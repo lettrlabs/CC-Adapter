@@ -3,6 +3,5 @@ config.toml
 adapter.log
 Cargo.lockdist/
 /dist
-Cargo.lock
 /.omc
 /.claude
