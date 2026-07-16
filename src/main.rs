@@ -129,56 +129,6 @@ fn resolve_log_file(cli: &Cli) -> Option<String> {
     Some(log_file)
 }
 
-/// 確保 Claude Code 的 onboarding 已略過（修改 ~/.claude.json）
-/// Ensure Claude Code onboarding is skipped (modifies ~/.claude.json)
-fn ensure_claude_onboarding() {
-    let Some(claude_json) = dirs::home_dir().map(|h| h.join(".claude.json")) else {
-        return;
-    };
-
-    // 讀取現有設定（若存在），避免覆寫使用者其他欄位
-    // Read existing config (if present) to avoid overwriting other fields
-    let mut config: serde_json::Value = if claude_json.exists() {
-        std::fs::read_to_string(&claude_json)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
-    let Some(obj) = config.as_object_mut() else { return };
-
-    // 已經設定過就跳過
-    // Skip if already configured
-    if obj.get("hasCompletedOnboarding").and_then(|v| v.as_bool()) == Some(true) {
-        return;
-    }
-
-    obj.insert("hasCompletedOnboarding".to_string(), serde_json::json!(true));
-    obj.insert("hasTrustDialogAccepted".to_string(), serde_json::json!(true));
-
-    if !obj.contains_key("customApiKeyResponses") {
-        obj.insert("customApiKeyResponses".to_string(), serde_json::json!({
-            "approved": []
-        }));
-    }
-
-    // 原子寫入
-    // Atomic write
-    let tmp_path = claude_json.with_extension("tmp");
-    if let Ok(content) = serde_json::to_string_pretty(&config)
-        && std::fs::write(&tmp_path, &content).is_ok()
-    {
-        let _ = std::fs::rename(&tmp_path, &claude_json);
-    }
-
-    info!(
-        path = %claude_json.display(),
-        "已自動略過 Claude Code 首次登入設定 / Auto-skipped Claude Code onboarding"
-    );
-}
-
 /// 執行 OAuth 登入流程
 /// Run the OAuth login flow
 async fn run_login(args: LoginArgs) -> anyhow::Result<()> {
@@ -460,9 +410,8 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // 確保 Claude Code onboarding 已略過 + 注入 ANTHROPIC_BASE_URL
-    // Ensure Claude Code onboarding is skipped + inject ANTHROPIC_BASE_URL
-    ensure_claude_onboarding();
+    // 注入 ANTHROPIC_BASE_URL
+    // Inject ANTHROPIC_BASE_URL
     inject_claude_settings(
         &config.server.host,
         config.server.port,
