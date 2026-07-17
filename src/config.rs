@@ -127,6 +127,13 @@ pub struct ServerConfig {
     /// Default 300000 (5 min); 0 = do not inject or backup/restore this variable.
     #[serde(default = "default_claude_stream_idle_timeout_ms")]
     pub claude_stream_idle_timeout_ms: u64,
+    /// 是否自動管理 ~/.claude/settings.json（注入/還原 ANTHROPIC_BASE_URL）。
+    /// 設為 false 時不修改 Claude 設定，改由使用者在 shell 中自行設定 ANTHROPIC_BASE_URL。
+    /// Whether to auto-manage ~/.claude/settings.json (inject/restore ANTHROPIC_BASE_URL).
+    /// Default true; set false to leave Claude settings untouched and opt in per shell
+    /// via the ANTHROPIC_BASE_URL environment variable.
+    #[serde(default = "default_manage_claude_settings")]
+    pub manage_claude_settings: bool,
 }
 
 fn default_log_level() -> String {
@@ -139,6 +146,10 @@ fn default_log_file_enabled() -> bool {
 
 fn default_claude_stream_idle_timeout_ms() -> u64 {
     300_000
+}
+
+fn default_manage_claude_settings() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -314,6 +325,7 @@ impl Config {
                     log_file: None,
                     log_file_enabled: true,
                     claude_stream_idle_timeout_ms: default_claude_stream_idle_timeout_ms(),
+                    manage_claude_settings: default_manage_claude_settings(),
                 },
                 providers: HashMap::new(),
                 models: ModelsConfig {

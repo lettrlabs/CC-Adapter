@@ -1,6 +1,11 @@
 [server]
 host = "127.0.0.1"
 port = 8080
+# 是否自動管理 ~/.claude/settings.json（注入/還原 ANTHROPIC_BASE_URL）。預設 true。
+# 設為 false 時不修改 Claude 設定；改在 shell 中設定 ANTHROPIC_BASE_URL 以按終端選用。
+# Whether to auto-manage ~/.claude/settings.json (inject/restore ANTHROPIC_BASE_URL). Default true.
+# Set false to leave Claude settings untouched and opt in per shell via ANTHROPIC_BASE_URL.
+# manage_claude_settings = true
 # 日誌等級：trace, debug, info, warn, error
 # Log level: trace, debug, info, warn, error
 # 也可透過 CLI --log-level 覆寫，或透過環境變數 RUST_LOG 設定

@@ -410,13 +410,15 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // 注入 ANTHROPIC_BASE_URL
-    // Inject ANTHROPIC_BASE_URL
-    inject_claude_settings(
-        &config.server.host,
-        config.server.port,
-        config.server.claude_stream_idle_timeout_ms,
-    );
+    // 注入 ANTHROPIC_BASE_URL（可透過 manage_claude_settings = false 停用）
+    // Inject ANTHROPIC_BASE_URL (disable with manage_claude_settings = false)
+    if config.server.manage_claude_settings {
+        inject_claude_settings(
+            &config.server.host,
+            config.server.port,
+            config.server.claude_stream_idle_timeout_ms,
+        );
+    }
 
     // 啟動 config.toml 檔案監控任務（背景輪詢 mtime）
     // Spawn config.toml file watcher task (background mtime polling)
@@ -448,28 +450,35 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
             println!("    {} → {} ({})", anthropic, route.model, route.provider);
         }
     }
-    println!("\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL{}", if config.server.claude_stream_idle_timeout_ms > 0 {
-        "、CLAUDE_STREAM_IDLE_TIMEOUT_MS"
-    } else {
-        ""
-    });
-    println!(
-        "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL{}",
-        if config.server.claude_stream_idle_timeout_ms > 0 {
-            ", CLAUDE_STREAM_IDLE_TIMEOUT_MS"
+    if config.server.manage_claude_settings {
+        println!("\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL{}", if config.server.claude_stream_idle_timeout_ms > 0 {
+            "、CLAUDE_STREAM_IDLE_TIMEOUT_MS"
         } else {
             ""
-        }
-    );
-    if config.server.claude_stream_idle_timeout_ms > 0 {
+        });
         println!(
-            "  （串流閒置逾時 {} ms / stream idle timeout {} ms）",
-            config.server.claude_stream_idle_timeout_ms,
-            config.server.claude_stream_idle_timeout_ms
+            "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL{}",
+            if config.server.claude_stream_idle_timeout_ms > 0 {
+                ", CLAUDE_STREAM_IDLE_TIMEOUT_MS"
+            } else {
+                ""
+            }
         );
+        if config.server.claude_stream_idle_timeout_ms > 0 {
+            println!(
+                "  （串流閒置逾時 {} ms / stream idle timeout {} ms）",
+                config.server.claude_stream_idle_timeout_ms,
+                config.server.claude_stream_idle_timeout_ms
+            );
+        }
+        println!("  直接開啟新終端執行 claude 即可使用，無需任何環境變數或 shell hook");
+        println!("  Just open a new terminal and run `claude` — no env vars or shell hooks needed");
+    } else {
+        println!("\n  未修改 ~/.claude/settings.json（manage_claude_settings = false）");
+        println!("  ~/.claude/settings.json left untouched (manage_claude_settings = false)");
+        println!("  要使用本代理，請在 shell 中設定 ANTHROPIC_BASE_URL=http://{} 後執行 claude", addr);
+        println!("  To use this proxy, set ANTHROPIC_BASE_URL=http://{} in your shell, then run claude", addr);
     }
-    println!("  直接開啟新終端執行 claude 即可使用，無需任何環境變數或 shell hook");
-    println!("  Just open a new terminal and run `claude` — no env vars or shell hooks needed");
     println!("\n  ⟳ 支援熱重載：修改 config.toml 後自動生效，無需重啟");
     println!("  ⟳ Hot-reload enabled: changes to config.toml take effect automatically");
     println!();
@@ -485,7 +494,9 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // 伺服器關閉後還原 ~/.claude/settings.json
     // Restore ~/.claude/settings.json after server shutdown
-    restore_claude_settings();
+    if config.server.manage_claude_settings {
+        restore_claude_settings();
+    }
 
     Ok(())
 }
