@@ -1,5 +1,6 @@
 mod auth;
 mod claude_settings;
+mod claude_settings_lifecycle;
 mod config;
 mod convert;
 mod error;
@@ -203,141 +204,9 @@ fn run_logout(args: LogoutArgs) -> anyhow::Result<()> {
 // Claude Code settings.json 管理 / Claude Code settings.json management
 // ---------------------------------------------------------------------------
 
-/// ~/.claude/settings.json 路徑
-fn claude_settings_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
-}
-
-/// 備份檔路徑：~/.claude-adapter/base_url_backup.json（內含所有由 adapter 管理的 env 值）
-fn backup_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude-adapter").join("base_url_backup.json"))
-}
-
 fn claude_proxy_url(host: &str, port: u16) -> String {
     let connect_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
     format!("http://{}:{}", connect_host, port)
-}
-
-fn write_json_with_temp_file(
-    path: &std::path::Path,
-    value: &serde_json::Value,
-) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let content = serde_json::to_string_pretty(value)?;
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, &content)?;
-    if std::fs::rename(&tmp_path, path).is_err() {
-        std::fs::write(path, &content)?;
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    Ok(())
-}
-
-/// 將 adapter 管理的 Claude Code `env` 值注入 ~/.claude/settings.json
-fn inject_claude_settings(host: &str, port: u16, stream_idle_timeout_ms: u64) -> bool {
-    let Some(path) = claude_settings_path() else {
-        return false;
-    };
-
-    let mut settings: serde_json::Value = if path.exists() {
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::warn!(error = %e, "無法讀取 Claude settings.json / Failed to read Claude settings.json");
-                return false;
-            }
-        };
-        match serde_json::from_str(&content) {
-            Ok(settings) => settings,
-            Err(e) => {
-                tracing::warn!(error = %e, "Claude settings.json 不是有效 JSON，未修改 / Claude settings.json is invalid JSON; left unchanged");
-                return false;
-            }
-        }
-    } else {
-        serde_json::json!({})
-    };
-
-    let proxy_url = claude_proxy_url(host, port);
-    let backup = match claude_settings::apply_managed_env(
-        &mut settings,
-        &proxy_url,
-        stream_idle_timeout_ms,
-    ) {
-        Ok(backup) => backup,
-        Err(e) => {
-            tracing::warn!(error = %e, "Claude settings.json env 無法安全管理，未修改 / Claude settings.json env cannot be managed safely; left unchanged");
-            return false;
-        }
-    };
-
-    let Some(bp) = backup_path() else {
-        return false;
-    };
-    if let Err(e) = write_json_with_temp_file(&bp, &backup) {
-        tracing::warn!(error = %e, "無法寫入 Claude settings 備份 / Failed to write Claude settings backup");
-        return false;
-    }
-    if let Err(e) = write_json_with_temp_file(&path, &settings) {
-        tracing::warn!(error = %e, "無法寫入 Claude settings.json / Failed to write Claude settings.json");
-        return false;
-    }
-
-    info!(
-        path = %path.display(),
-        url = %proxy_url,
-        stream_idle_ms = stream_idle_timeout_ms,
-        "已注入 Claude Code env 至 settings.json / Injected Claude Code env into settings.json"
-    );
-    true
-}
-
-/// 還原 ~/.claude/settings.json 中由本程式注入的 `env` 鍵
-fn restore_claude_settings() {
-    let Some(path) = claude_settings_path() else {
-        return;
-    };
-    let Some(bp) = backup_path() else { return };
-
-    if !path.exists() {
-        return;
-    }
-
-    let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(settings) => settings,
-            Err(e) => {
-                tracing::warn!(error = %e, "Claude settings.json 不是有效 JSON，無法還原 / Claude settings.json is invalid JSON; cannot restore");
-                return;
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "無法讀取 Claude settings.json 以還原 / Failed to read Claude settings.json for restore");
-            return;
-        }
-    };
-
-    let backup: Option<serde_json::Value> = std::fs::read_to_string(&bp)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
-
-    if let Err(e) = claude_settings::restore_managed_env(&mut settings, backup.as_ref()) {
-        tracing::warn!(error = %e, "Claude settings.json env 無法安全還原，未修改 / Claude settings.json env cannot be restored safely; left unchanged");
-        return;
-    }
-
-    if let Err(e) = write_json_with_temp_file(&path, &settings) {
-        tracing::warn!(error = %e, "無法寫入已還原的 Claude settings.json / Failed to write restored Claude settings.json");
-        return;
-    }
-
-    let _ = std::fs::remove_file(&bp);
-
-    eprintln!("\n  已還原 ~/.claude/settings.json — adapter 管理的 Claude Code env 已還原");
-    eprintln!("  Restored ~/.claude/settings.json — adapter-managed Claude Code env restored\n");
 }
 
 /// 啟動 Adapter 代理伺服器
@@ -370,15 +239,28 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // 注入 adapter 管理的 Claude Code env（可透過 manage_claude_settings = false 停用）
     // Inject adapter-managed Claude Code env (disable with manage_claude_settings = false)
-    let claude_settings_managed = if config.server.manage_claude_settings {
-        inject_claude_settings(
-            &config.server.host,
-            config.server.port,
+    let claude_settings_manager = if config.server.manage_claude_settings {
+        let proxy_url = claude_proxy_url(&config.server.host, config.server.port);
+        match claude_settings_lifecycle::start(
+            &proxy_url,
             config.server.claude_stream_idle_timeout_ms,
-        )
+        ) {
+            Ok(Some(manager)) => Some(manager),
+            Ok(None) => {
+                tracing::warn!(
+                    "Claude settings are managed by another adapter process; using manual mode"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "無法安全管理 Claude settings.json，改用手動模式 / Failed to manage Claude settings.json safely; using manual mode");
+                None
+            }
+        }
     } else {
-        false
+        None
     };
+    let claude_settings_managed = claude_settings_manager.is_some();
 
     // 啟動 config.toml 檔案監控任務（背景輪詢 mtime）
     // Spawn config.toml file watcher task (background mtime polling)
@@ -471,8 +353,20 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // 伺服器關閉後還原 ~/.claude/settings.json
     // Restore ~/.claude/settings.json after server shutdown
-    if claude_settings_managed {
-        restore_claude_settings();
+    if let Some(manager) = claude_settings_manager {
+        match manager.restore() {
+            Ok(()) => {
+                eprintln!(
+                    "\n  已還原 ~/.claude/settings.json — adapter 管理的 Claude Code env 已還原"
+                );
+                eprintln!(
+                    "  Restored ~/.claude/settings.json — adapter-managed Claude Code env restored\n"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "無法安全還原 Claude settings.json；保留備份 / Failed to restore Claude settings.json safely; backup retained");
+            }
+        }
     }
 
     Ok(())

@@ -50,7 +50,9 @@ pub fn apply_managed_env(
     );
     backup.insert(
         "anthropic_api_key".to_string(),
-        backup_entry(existing_env, API_KEY_ENV),
+        json!({
+            "injected": existing_env.is_none_or(|env| !env.contains_key(API_KEY_ENV)),
+        }),
     );
     backup.insert(
         "enable_tool_search".to_string(),
@@ -73,10 +75,12 @@ pub fn apply_managed_env(
         BASE_URL_ENV.to_string(),
         Value::String(proxy_url.to_string()),
     );
-    env.insert(
-        API_KEY_ENV.to_string(),
-        Value::String(LOCAL_API_KEY.to_string()),
-    );
+    if !env.contains_key(API_KEY_ENV) {
+        env.insert(
+            API_KEY_ENV.to_string(),
+            Value::String(LOCAL_API_KEY.to_string()),
+        );
+    }
     env.insert(
         TOOL_SEARCH_ENV.to_string(),
         Value::String(TOOL_SEARCH_ENABLED.to_string()),
@@ -103,6 +107,19 @@ fn restore_section(env: &mut Map<String, Value>, key: &str, section: Option<&Val
             env.remove(key);
         }
         None => {}
+    }
+}
+
+fn restore_api_key(env: &mut Map<String, Value>, section: Option<&Value>) {
+    let Some(section) = section else { return };
+    match section.get("injected").and_then(Value::as_bool) {
+        Some(true) => {
+            if env.get(API_KEY_ENV).and_then(Value::as_str) == Some(LOCAL_API_KEY) {
+                env.remove(API_KEY_ENV);
+            }
+        }
+        Some(false) => {}
+        None => restore_section(env, API_KEY_ENV, Some(section)),
     }
 }
 
@@ -136,7 +153,7 @@ pub fn restore_managed_env(
                 .get("anthropic_base_url")
                 .or_else(|| backup.get("had_value").is_some().then_some(backup));
             restore_section(env, BASE_URL_ENV, base);
-            restore_section(env, API_KEY_ENV, backup.get("anthropic_api_key"));
+            restore_api_key(env, backup.get("anthropic_api_key"));
             restore_section(env, TOOL_SEARCH_ENV, backup.get("enable_tool_search"));
             restore_section(
                 env,
@@ -185,12 +202,13 @@ mod tests {
             settings["env"]["ANTHROPIC_BASE_URL"],
             "http://127.0.0.1:8080"
         );
-        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "cc-adapter-local");
+        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "existing-key");
         assert_eq!(settings["env"]["ENABLE_TOOL_SEARCH"], "true");
         assert_eq!(settings["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"], "300000");
         assert_eq!(settings["env"]["UNRELATED"], "keep");
         assert_eq!(settings["permissions"], json!({"allow": ["Read"]}));
-        assert_eq!(backup["anthropic_api_key"]["old_value"], "existing-key");
+        assert_eq!(backup["anthropic_api_key"]["injected"], false);
+        assert!(backup["anthropic_api_key"].get("old_value").is_none());
         assert_eq!(backup["enable_tool_search"]["old_value"], "auto:5");
     }
 
@@ -209,6 +227,26 @@ mod tests {
 
         restore_managed_env(&mut settings, Some(&backup)).unwrap();
 
+        assert_eq!(settings, original);
+    }
+
+    #[test]
+    fn existing_api_key_is_never_changed_or_serialized_into_backup() {
+        const SENTINEL_SECRET: &str = "sentinel-anthropic-secret-do-not-persist";
+        let original = json!({
+            "env": {
+                "ANTHROPIC_API_KEY": SENTINEL_SECRET,
+                "UNRELATED": "keep"
+            }
+        });
+        let mut settings = original.clone();
+
+        let backup = apply_managed_env(&mut settings, "http://127.0.0.1:8080", 300_000).unwrap();
+        let serialized_backup = serde_json::to_string(&backup).unwrap();
+
+        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], SENTINEL_SECRET);
+        assert!(!serialized_backup.contains(SENTINEL_SECRET));
+        restore_managed_env(&mut settings, Some(&backup)).unwrap();
         assert_eq!(settings, original);
     }
 
