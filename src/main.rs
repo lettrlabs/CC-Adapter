@@ -294,7 +294,7 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     }
     if claude_settings_managed {
         println!(
-            "\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL、ANTHROPIC_API_KEY、ENABLE_TOOL_SEARCH{}",
+            "\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL、ENABLE_TOOL_SEARCH{}",
             if config.server.claude_stream_idle_timeout_ms > 0 {
                 "、CLAUDE_STREAM_IDLE_TIMEOUT_MS"
             } else {
@@ -302,7 +302,7 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
             }
         );
         println!(
-            "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ENABLE_TOOL_SEARCH{}",
+            "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL, ENABLE_TOOL_SEARCH{}",
             if config.server.claude_stream_idle_timeout_ms > 0 {
                 ", CLAUDE_STREAM_IDLE_TIMEOUT_MS"
             } else {
@@ -332,7 +332,6 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
         println!("  要使用本代理，請設定以下變數後執行 claude：");
         println!("  To use this proxy, set these variables, then run `claude`:");
         println!("    ANTHROPIC_BASE_URL={}", proxy_url);
-        println!("    ANTHROPIC_API_KEY={}", claude_settings::LOCAL_API_KEY);
         println!(
             "    ENABLE_TOOL_SEARCH={}",
             claude_settings::TOOL_SEARCH_ENABLED

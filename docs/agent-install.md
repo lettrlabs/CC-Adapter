@@ -225,11 +225,13 @@ ADAPTER_API_KEY=sk-xxx claude-adapter serve --config ~/.config/claude-adapter/co
 
 The adapter will:
 1. Start listening on `http://127.0.0.1:8080`
-2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` (injecting `cc-adapter-local` only if the key is absent), `ENABLE_TOOL_SEARCH=true`, and optionally `CLAUDE_STREAM_IDLE_TIMEOUT_MS` (default 300000 ms; set `[server] claude_stream_idle_timeout_ms = 0` to leave it unmanaged)
+2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH=true`, and optionally `CLAUDE_STREAM_IDLE_TIMEOUT_MS` (default 300000 ms; set `[server] claude_stream_idle_timeout_ms = 0` to leave it unmanaged)
 3. Hot-reload `config.toml` changes automatically while running
 4. Restore the exact previous presence and values of managed `env` keys on normal shutdown (Ctrl+C / SIGTERM / SIGHUP)
 
-Automatic management leaves an existing `ANTHROPIC_API_KEY` value untouched and never serializes it into backup; prior values of other managed keys are stored for restoration. It uses an exclusive ownership lock and atomic replacement for each backup or settings-file write. A stale backup left by an abrupt stop or power loss is restored on the next adapter startup before fresh settings are applied.
+Automatic settings behavior does not own `ANTHROPIC_API_KEY`: with the current backup shape it does not add, overwrite, remove, back up, or restore the key, and new backups do not contain an `anthropic_api_key` section. Stale backups from older releases remain compatible: recovery removes a legacy injected `cc-adapter-local` value only if it is still present, or restores the prior value encoded in the legacy backup.
+
+Prior values of managed keys are stored for restoration. Settings management uses an exclusive ownership lock and atomic replacement for each backup or settings-file write. A stale backup left by an abrupt stop or power loss is restored on the next adapter startup before fresh settings are applied.
 
 Lock contention leaves `settings.json` untouched and prints the manual per-shell configuration. A later lifecycle failure also falls back to manual mode and retains any recoverable backup state, but the lifecycle is not a transaction across both files: stale recovery may already have restored the original settings before a later backup-cleanup or fresh-application error.
 
@@ -261,13 +263,12 @@ To leave `~/.claude/settings.json` untouched, add this to the config:
 manage_claude_settings = false
 ```
 
-Start the adapter, then set all three required values in the shell that will run Claude Code. `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional.
+Start the adapter, then set the two required values in the shell that will run Claude Code. `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional.
 
 PowerShell:
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
-$env:ANTHROPIC_API_KEY = "cc-adapter-local"
 $env:ENABLE_TOOL_SEARCH = "true"
 claude
 ```
@@ -276,12 +277,15 @@ POSIX shell:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_API_KEY=cc-adapter-local
 export ENABLE_TOOL_SEARCH=true
 claude
 ```
 
 Use the adapter's actual host and port if they differ from `127.0.0.1:8080`.
+
+Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.
+
+Signed-in Claude Code can be out of Claude model credits because routed inference uses ChatGPT/Codex quota.
 
 ## Troubleshooting
 

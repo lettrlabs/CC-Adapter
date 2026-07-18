@@ -1,20 +1,31 @@
 [server]
 host = "127.0.0.1"
 port = 8080
-# 是否自動管理 ~/.claude/settings.json。預設 true；會設定 ANTHROPIC_BASE_URL、ENABLE_TOOL_SEARCH，
-# 並僅在 ANTHROPIC_API_KEY 不存在時注入非機密的 cc-adapter-local。
-# 使用獨佔鎖與逐檔原子置換；備份不會序列化既有 ANTHROPIC_API_KEY，但會保存其他受管理鍵的舊值。
+# 是否自動管理 ~/.claude/settings.json。預設 true；只會設定 ANTHROPIC_BASE_URL、ENABLE_TOOL_SEARCH，
+# 以及選用的 CLAUDE_STREAM_IDLE_TIMEOUT_MS。
+# 自動設定行為不擁有 ANTHROPIC_API_KEY：使用目前備份格式時，不會新增、覆寫、移除、備份或還原該 key，
+# 新備份也不含 anthropic_api_key 區段。
+# 舊版備份仍可復原：只在值仍為 cc-adapter-local 時移除舊版注入值，或還原舊備份保存的原值。
+# 使用獨佔鎖與逐檔原子置換，並保存其他受管理鍵的舊值。
 # 正常結束時精確還原，殘留備份則在下次啟動復原。鎖競爭不修改設定；其他生命週期失敗會改用手動模式，
 # 並保留任何可復原的備份狀態。殘留備份可能已先還原原始設定，因此多檔案生命週期並非單一交易。
-# Whether to auto-manage ~/.claude/settings.json. Default true; manages ANTHROPIC_BASE_URL and
-# ENABLE_TOOL_SEARCH, and injects the non-secret cc-adapter-local ANTHROPIC_API_KEY only when absent.
-# Uses exclusive ownership and per-file atomic replacement. The backup does not serialize an existing
-# ANTHROPIC_API_KEY, but preserves old values of other managed keys. Normal shutdown restores exactly;
+# Whether to auto-manage ~/.claude/settings.json. Default true; manages ANTHROPIC_BASE_URL,
+# ENABLE_TOOL_SEARCH, and the optional CLAUDE_STREAM_IDLE_TIMEOUT_MS.
+# Automatic settings behavior does not own `ANTHROPIC_API_KEY`: with the current backup shape it does not add, overwrite, remove, back up, or restore the key, and new backups do not contain an `anthropic_api_key` section.
+# Older backups remain recoverable: recovery removes a legacy injected cc-adapter-local only if it is
+# still present, or restores the prior value encoded in the legacy backup.
+# Uses exclusive ownership and per-file atomic replacement, preserving old values of managed keys.
+# Normal shutdown restores exactly;
 # the next start recovers stale backups. Lock contention leaves settings untouched. Other lifecycle
 # failures fall back to manual mode and retain any recoverable backup state; stale restoration may
 # already have completed, so the multi-file lifecycle is not transactional.
-# Set false to leave Claude settings untouched; manually set ANTHROPIC_BASE_URL,
-# ANTHROPIC_API_KEY, and ENABLE_TOOL_SEARCH in each shell that runs Claude Code.
+# Set false to leave Claude settings untouched; manually set ANTHROPIC_BASE_URL and
+# ENABLE_TOOL_SEARCH=true in each shell that runs Claude Code.
+# 若 Claude Code 尚未登入，可選擇設定 ANTHROPIC_API_KEY=cc-adapter-local 作為後備。任何 API key 都會優先於
+# Claude.ai 登入，並停用 Claude.ai 託管的 connectors；本機/已設定的 MCP servers 仍可使用。
+# 已登入的 Claude Code 即使沒有 Claude model credits 也能使用：路由推論會耗用 ChatGPT/Codex quota。
+# Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.
+# Signed-in Claude Code can be out of Claude model credits because routed inference uses ChatGPT/Codex quota.
 # manage_claude_settings = true
 # 日誌等級：trace, debug, info, warn, error
 # Log level: trace, debug, info, warn, error

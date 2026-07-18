@@ -311,6 +311,8 @@ mod tests {
         });
 
         let log_bytes = logs.0.lock().unwrap().clone();
+        let captured_backup: Value = serde_json::from_slice(&disk_backup.lock().unwrap()).unwrap();
+        assert!(captured_backup.get("anthropic_api_key").is_none());
         assert!(!String::from_utf8_lossy(&disk_backup.lock().unwrap()).contains(SENTINEL_SECRET));
         assert!(!String::from_utf8_lossy(&log_bytes).contains(SENTINEL_SECRET));
         assert_eq!(read_json(&paths.settings), original);
@@ -352,23 +354,37 @@ mod tests {
             }),
         );
 
-        let manager = start_with_writer(
-            paths.clone(),
-            "http://127.0.0.1:9090",
-            600_000,
-            &AtomicJsonFileWriter,
-        )
-        .unwrap()
-        .unwrap();
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        let manager = tracing::subscriber::with_default(subscriber, || {
+            start_with_writer(
+                paths.clone(),
+                "http://127.0.0.1:9090",
+                600_000,
+                &AtomicJsonFileWriter,
+            )
+            .unwrap()
+            .unwrap()
+        });
         assert_eq!(
             read_json(&paths.settings)["env"]["ANTHROPIC_BASE_URL"],
             "http://127.0.0.1:9090"
         );
+        assert_eq!(
+            read_json(&paths.settings)["env"]["ANTHROPIC_API_KEY"],
+            SENTINEL_SECRET
+        );
+        assert!(read_json(&paths.backup).get("anthropic_api_key").is_none());
         assert!(
             !std::fs::read_to_string(&paths.backup)
                 .unwrap()
                 .contains(SENTINEL_SECRET)
         );
+        assert!(!String::from_utf8_lossy(&logs.0.lock().unwrap()).contains(SENTINEL_SECRET));
 
         manager.restore_with_writer(&AtomicJsonFileWriter).unwrap();
 

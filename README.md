@@ -219,11 +219,12 @@ ADAPTER_API_KEY=sk-xxx ./target/release/claude-adapter
 With the default `[server] manage_claude_settings = true`, startup automatically manages these values in `~/.claude/settings.json`:
 
 - `ANTHROPIC_BASE_URL` points Claude Code at CC-Adapter.
-- `ANTHROPIC_API_KEY` selects Claude Code's API-key routing mode. An existing value is left untouched; the non-secret local placeholder `cc-adapter-local` is injected only when the key is absent. The placeholder is not an adapter or upstream-provider credential and is not forwarded as provider authentication.
 - `ENABLE_TOOL_SEARCH=true` keeps Claude Code's local Tool Search enabled when using a custom base URL.
 - `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional. It is managed when `claude_stream_idle_timeout_ms` is greater than `0` (default `300000` ms) and left alone when set to `0`.
 
-Settings management takes an exclusive ownership lock and writes each backup or settings file with atomic replacement. The backup does not serialize an existing `ANTHROPIC_API_KEY`; it does preserve prior values of other managed keys needed for restoration. On normal shutdown, the adapter restores the exact previous presence and values of the settings it managed. If an earlier run left a stale backup, the next startup restores it before applying a fresh configuration; this is the implemented recovery path after an abrupt stop or power loss.
+Automatic settings behavior does not own `ANTHROPIC_API_KEY`: with the current backup shape it does not add, overwrite, remove, back up, or restore the key, and new backups do not contain an `anthropic_api_key` section. Stale backups from older releases remain compatible: recovery removes a legacy injected `cc-adapter-local` value only if it is still present, or restores the prior value encoded in the legacy backup.
+
+Settings management takes an exclusive ownership lock and writes each backup or settings file with atomic replacement. It preserves prior values of managed keys needed for restoration. On normal shutdown, the adapter restores the exact previous presence and values of the settings it managed. If an earlier run left a stale backup, the next startup restores it before applying a fresh configuration; this is the implemented recovery path after an abrupt stop or power loss.
 
 If another adapter owns the lock, CC-Adapter leaves settings untouched and prints the manual per-shell configuration. If a later settings-lifecycle step fails, the adapter also falls back to manual mode and retains any recoverable backup state. Stale recovery may already have restored the original settings before a later backup-cleanup or fresh-application error, so the multi-file lifecycle is not transactional.
 
@@ -241,7 +242,6 @@ PowerShell:
 
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
-$env:ANTHROPIC_API_KEY = "cc-adapter-local"
 $env:ENABLE_TOOL_SEARCH = "true"
 claude
 ```
@@ -250,16 +250,17 @@ POSIX shell:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_API_KEY=cc-adapter-local
 export ENABLE_TOOL_SEARCH=true
 claude
 ```
 
 `CLAUDE_STREAM_IDLE_TIMEOUT_MS` remains optional in manual mode. Adjust the URL if the adapter listens on another host or port.
 
+Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.
+
 #### Usage quota
 
-Routed model requests consume the selected provider's quota. In particular, ChatGPT/Codex routes use the configured ChatGPT/Codex provider quota, not Claude Code model credits or Anthropic model quota. Claude Code still performs local orchestration and all MCP work; only model inference is routed through CC-Adapter.
+Routed model requests consume the selected provider's quota. Signed-in Claude Code can be out of Claude model credits because routed inference uses ChatGPT/Codex quota. Claude Code still performs local orchestration and all MCP work; only model inference is routed through CC-Adapter.
 
 ## Provider Examples
 
@@ -333,7 +334,6 @@ The container listens on `0.0.0.0:8080` by default. Automatic host settings mana
 
 ```bash
 export ANTHROPIC_BASE_URL=http://<docker-host>:8080
-export ANTHROPIC_API_KEY=cc-adapter-local
 export ENABLE_TOOL_SEARCH=true
 claude
 ```
