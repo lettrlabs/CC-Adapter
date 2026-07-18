@@ -72,7 +72,7 @@ fn convert_message_to_input(msg: &Message, out: &mut Vec<InputItem>) -> Result<(
     match &msg.content {
         MessageContent::Text(text) => {
             out.push(InputItem::Message {
-                role: msg.role.clone(),
+                role: normalize_input_role(&msg.role),
                 content: InputContent::Text(text.clone()),
             });
         }
@@ -81,6 +81,23 @@ fn convert_message_to_input(msg: &Message, out: &mut Vec<InputItem>) -> Result<(
         }
     }
     Ok(())
+}
+
+/// ChatGPT Codex 的 input 只接受 user/assistant 角色；Claude Code 會在 messages
+/// 內夾帶 role="system" 訊息（例如 SessionStart hook 內容），Codex 對此回
+/// HTTP 400 "System messages are not allowed"。將非 assistant 角色一律映射為
+/// user，保留其在對話中的位置。
+/// ChatGPT Codex only accepts user/assistant roles in `input`; Claude Code
+/// embeds role="system" messages in `messages` (e.g. SessionStart hook
+/// context), which Codex rejects with HTTP 400 "System messages are not
+/// allowed". Map any non-assistant role to user, preserving conversation
+/// position.
+fn normalize_input_role(role: &str) -> String {
+    if role == "assistant" {
+        "assistant".to_string()
+    } else {
+        "user".to_string()
+    }
 }
 
 /// 轉換 Anthropic 內容區塊為 Responses API input items
@@ -92,15 +109,10 @@ fn convert_blocks_to_input(
 ) -> Result<()> {
     match role {
         "assistant" => convert_assistant_blocks(blocks, out),
-        "user" => convert_user_blocks(blocks, out),
-        _ => {
-            let text = extract_text_from_blocks(blocks);
-            out.push(InputItem::Message {
-                role: role.to_string(),
-                content: InputContent::Text(text),
-            });
-            Ok(())
-        }
+        // system（或其他未知角色）一律走 user 路徑，避免 Codex 拒收 system 訊息
+        // Route system (or any unknown role) through the user path — Codex
+        // rejects system messages in `input`
+        _ => convert_user_blocks(blocks, out),
     }
 }
 
@@ -279,6 +291,52 @@ mod tests {
         assert!(!result.store);
         assert!(result.stream);
         assert_eq!(result.input.len(), 1);
+    }
+
+    #[test]
+    fn test_system_role_messages_become_user() {
+        // Claude Code 會在 messages 內夾帶 role="system" 訊息；Codex 拒收 system，
+        // 必須映射為 user。
+        // Claude Code embeds role="system" messages in `messages`; Codex rejects
+        // system roles in `input`, so they must be mapped to user.
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: MessageContent::Text("Hello".to_string()),
+                },
+                Message {
+                    role: "system".to_string(),
+                    content: MessageContent::Text("SessionStart hook context".to_string()),
+                },
+                Message {
+                    role: "system".to_string(),
+                    content: MessageContent::Blocks(vec![ContentBlock::Text {
+                        text: "block-style system message".to_string(),
+                    }]),
+                },
+            ],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+        };
+
+        let result = convert_request_to_responses(req, "gpt-5.6-sol").unwrap();
+
+        assert_eq!(result.input.len(), 3);
+        for item in &result.input {
+            if let InputItem::Message { role, .. } = item {
+                assert_ne!(role, "system", "system role must not reach Codex input");
+            }
+        }
     }
 
     #[test]
