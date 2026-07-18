@@ -1,10 +1,16 @@
 # Lazy MCP Tool Search Implementation Plan
 
+## Final implementation correction (smoke-verified)
+
+Older Task 3, Task 4, and Task 5 snippets that require or inject `ANTHROPIC_API_KEY` are superseded by the smoke-verified OAuth-preserving behavior. The final implementation automatically manages only `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH=true`, and optional `CLAUDE_STREAM_IDLE_TIMEOUT_MS`. It leaves `ANTHROPIC_API_KEY` untouched so a signed-in Claude.ai session and Claude.ai-hosted connectors remain available. `ANTHROPIC_API_KEY=cc-adapter-local` is an optional fallback only for a Claude Code client that is not signed in; setting any API key takes precedence over Claude.ai login and disables Claude.ai-hosted connectors, while local/configured MCP servers continue to work. Backup-less restore is a complete no-op because no ownership record exists.
+
+The older task snippets below are retained as implementation history only and must not be used as current setup or restore guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve Claude Code's complete MCP catalog while forwarding only non-deferred and locally discovered tool schemas to the ChatGPT Codex model.
 
-**Architecture:** Claude Code remains the MCP host and executor. CC-Adapter parses Anthropic `defer_loading` and `tool_reference` metadata, reconstructs the loaded tool set from request history, and filters the Responses API tool array without storing server-side session state. The adapter also configures Claude Code to use gateway authentication and Tool Search whenever automatic settings management is enabled.
+**Architecture:** Claude Code remains the MCP host and executor. CC-Adapter parses Anthropic `defer_loading` and `tool_reference` metadata, reconstructs the loaded tool set from request history, and filters the Responses API tool array without storing server-side session state. Automatic settings management configures the adapter base URL and Tool Search while preserving Claude.ai OAuth login.
 
 **Tech Stack:** Rust 2024, serde/serde_json, anyhow, tracing, Axum, Cargo unit tests, Claude Code CLI.
 

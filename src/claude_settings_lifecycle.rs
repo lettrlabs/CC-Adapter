@@ -116,21 +116,21 @@ fn restore_claude_settings_at(
     paths: &ClaudeSettingsPaths,
     writer: &dyn JsonFileWriter,
 ) -> anyhow::Result<()> {
+    let Some(backup) = read_backup(paths)? else {
+        return Ok(());
+    };
     let mut settings = read_settings(paths)?;
-    let backup = read_backup(paths)?;
-    claude_settings::restore_managed_env(&mut settings, backup.as_ref())
+    claude_settings::restore_managed_env(&mut settings, Some(&backup))
         .map_err(anyhow::Error::msg)?;
 
     writer.write_json(&paths.settings, &settings)?;
-    if backup.is_some() {
-        std::fs::remove_file(&paths.backup).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to remove Claude settings backup '{}': {}",
-                paths.backup.display(),
-                e
-            )
-        })?;
-    }
+    std::fs::remove_file(&paths.backup).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to remove Claude settings backup '{}': {}",
+            paths.backup.display(),
+            e
+        )
+    })?;
 
     info!(
         path = %paths.settings.display(),
@@ -315,6 +315,54 @@ mod tests {
         assert!(captured_backup.get("anthropic_api_key").is_none());
         assert!(!String::from_utf8_lossy(&disk_backup.lock().unwrap()).contains(SENTINEL_SECRET));
         assert!(!String::from_utf8_lossy(&log_bytes).contains(SENTINEL_SECRET));
+        assert_eq!(read_json(&paths.settings), original);
+    }
+
+    #[test]
+    fn restore_is_replay_safe_after_backup_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(&temp);
+        let original = json!({
+            "env": {
+                "ENABLE_TOOL_SEARCH": "true",
+                "UNRELATED": {"preserve": "exactly"}
+            },
+            "permissions": {"allow": ["Read"]}
+        });
+        write_json(&paths.settings, &original);
+        let manager = start_with_writer(
+            paths.clone(),
+            "http://127.0.0.1:8080",
+            300_000,
+            &AtomicJsonFileWriter,
+        )
+        .unwrap()
+        .unwrap();
+
+        manager.restore_with_writer(&AtomicJsonFileWriter).unwrap();
+        let settings_after_first_restore = std::fs::read(&paths.settings).unwrap();
+        assert_eq!(read_json(&paths.settings), original);
+        assert!(!paths.backup.exists());
+
+        let fail_on_any_write = FailOnWrite::new(1);
+        manager.restore_with_writer(&fail_on_any_write).unwrap();
+
+        assert_eq!(fail_on_any_write.calls.get(), 0);
+        assert_eq!(
+            std::fs::read(&paths.settings).unwrap(),
+            settings_after_first_restore
+        );
+        assert_eq!(read_json(&paths.settings), original);
+        assert!(!paths.backup.exists());
+
+        let competing_manager = start_with_writer(
+            paths.clone(),
+            "http://127.0.0.1:9090",
+            600_000,
+            &AtomicJsonFileWriter,
+        )
+        .unwrap();
+        assert!(competing_manager.is_none());
         assert_eq!(read_json(&paths.settings), original);
     }
 

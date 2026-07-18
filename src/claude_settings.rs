@@ -115,11 +115,10 @@ pub fn restore_managed_env(
     settings: &mut Value,
     backup: Option<&Value>,
 ) -> Result<(), &'static str> {
-    env_object(settings)?;
-
-    if settings_object(settings)?.get("env").is_none() && backup.is_none() {
+    let Some(backup) = backup else {
         return Ok(());
-    }
+    };
+    env_object(settings)?;
 
     let env = settings_object_mut(settings)?
         .entry("env".to_string())
@@ -127,36 +126,25 @@ pub fn restore_managed_env(
         .as_object_mut()
         .ok_or(NON_OBJECT_ENV_ERROR)?;
 
-    match backup {
-        None => {
-            if env.get(TOOL_SEARCH_ENV).and_then(Value::as_str) == Some(TOOL_SEARCH_ENABLED) {
-                env.remove(TOOL_SEARCH_ENV);
-            }
-        }
-        Some(backup) => {
-            let base = backup
-                .get("anthropic_base_url")
-                .or_else(|| backup.get("had_value").is_some().then_some(backup));
-            restore_section(env, BASE_URL_ENV, base);
-            restore_api_key(env, backup.get("anthropic_api_key"));
-            restore_section(env, TOOL_SEARCH_ENV, backup.get("enable_tool_search"));
-            restore_section(
-                env,
-                STREAM_TIMEOUT_ENV,
-                backup.get("claude_stream_idle_timeout_ms"),
-            );
-        }
-    }
+    let base = backup
+        .get("anthropic_base_url")
+        .or_else(|| backup.get("had_value").is_some().then_some(backup));
+    restore_section(env, BASE_URL_ENV, base);
+    restore_api_key(env, backup.get("anthropic_api_key"));
+    restore_section(env, TOOL_SEARCH_ENV, backup.get("enable_tool_search"));
+    restore_section(
+        env,
+        STREAM_TIMEOUT_ENV,
+        backup.get("claude_stream_idle_timeout_ms"),
+    );
 
     let env_is_empty = settings
         .get("env")
         .and_then(Value::as_object)
         .is_some_and(Map::is_empty);
     let remove_env = env_is_empty
-        && backup.is_some_and(|backup| {
-            backup.get("env_was_present").and_then(Value::as_bool) == Some(false)
-                || backup.get("env_was_present").is_none()
-        });
+        && (backup.get("env_was_present").and_then(Value::as_bool) == Some(false)
+            || backup.get("env_was_present").is_none());
     if remove_env {
         settings_object_mut(settings)?.remove("env");
     }
@@ -342,42 +330,30 @@ mod tests {
     }
 
     #[test]
-    fn no_backup_preserves_manually_supplied_local_api_key() {
-        let mut adapter_values = json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://user.example",
-                "ANTHROPIC_API_KEY": "cc-adapter-local",
-                "ENABLE_TOOL_SEARCH": "true",
-                "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "300000",
-                "UNRELATED": "keep"
-            }
-        });
-
-        restore_managed_env(&mut adapter_values, None).unwrap();
-
-        assert_eq!(
-            adapter_values,
+    fn no_backup_restore_is_a_complete_no_op() {
+        let originals = [
             json!({
                 "env": {
                     "ANTHROPIC_BASE_URL": "https://user.example",
                     "ANTHROPIC_API_KEY": "cc-adapter-local",
+                    "ENABLE_TOOL_SEARCH": "true",
                     "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "300000",
                     "UNRELATED": "keep"
-                }
-            })
-        );
+                },
+                "permissions": {"allow": ["Read"]}
+            }),
+            json!({"env": {}}),
+            json!({"permissions": {"allow": ["Read"]}}),
+            json!({"env": "user-owned-non-object"}),
+        ];
 
-        let original_user_values = json!({
-            "env": {
-                "ANTHROPIC_API_KEY": "user-key",
-                "ENABLE_TOOL_SEARCH": "auto:5"
-            }
-        });
-        let mut user_values = original_user_values.clone();
+        for original in originals {
+            let mut settings = original.clone();
 
-        restore_managed_env(&mut user_values, None).unwrap();
+            restore_managed_env(&mut settings, None).unwrap();
 
-        assert_eq!(user_values, original_user_values);
+            assert_eq!(settings, original);
+        }
     }
 
     #[test]
@@ -427,9 +403,17 @@ mod tests {
         const README: &str = include_str!("../README.md");
         const AGENT_INSTALL: &str = include_str!("../docs/agent-install.md");
         const CONFIG_EXAMPLE: &str = include_str!("../config-example.toml");
+        const DESIGN: &str =
+            include_str!("../docs/superpowers/specs/2026-07-17-lazy-mcp-tool-search-design.md");
+        const PLAN: &str =
+            include_str!("../docs/superpowers/plans/2026-07-17-lazy-mcp-tool-search.md");
         const AUTOMATIC_NON_OWNERSHIP: &str = "Automatic settings behavior does not own `ANTHROPIC_API_KEY`: with the current backup shape it does not add, overwrite, remove, back up, or restore the key, and new backups do not contain an `anthropic_api_key` section.";
         const FALLBACK_WARNING: &str = "Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.";
         const QUOTA_GUIDANCE: &str = "Signed-in Claude Code can be out of Claude model credits because routed inference uses ChatGPT/Codex quota.";
+        const DESIGN_AUTOMATIC_SETTINGS: &str = "Automatic mode manages only `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH=true`, and optional `CLAUDE_STREAM_IDLE_TIMEOUT_MS`; it leaves `ANTHROPIC_API_KEY` untouched so signed-in Claude.ai OAuth and hosted connectors remain available.";
+        const PLAN_CORRECTION: &str = "Older Task 3, Task 4, and Task 5 snippets that require or inject `ANTHROPIC_API_KEY` are superseded by the smoke-verified OAuth-preserving behavior.";
+        const REPLAY_SAFETY: &str =
+            "Backup-less restore is a complete no-op because no ownership record exists.";
 
         assert!(!MAIN_SOURCE.contains(
             "Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY"
@@ -443,6 +427,11 @@ mod tests {
             assert!(!document.contains("$env:ANTHROPIC_API_KEY"));
             assert!(!document.contains("export ANTHROPIC_API_KEY"));
         }
+        assert!(DESIGN.contains(DESIGN_AUTOMATIC_SETTINGS));
+        assert!(DESIGN.contains(FALLBACK_WARNING));
+        assert!(PLAN.contains("## Final implementation correction (smoke-verified)"));
+        assert!(PLAN.contains(PLAN_CORRECTION));
+        assert!(PLAN.contains(REPLAY_SAFETY));
     }
 
     #[test]

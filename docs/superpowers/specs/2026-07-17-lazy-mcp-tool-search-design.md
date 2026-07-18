@@ -80,16 +80,19 @@ An unknown reference will not crash conversion. It will be excluded unless a mat
 
 ## Claude Code Settings
 
-When `manage_claude_settings=true`, the adapter will manage four environment keys in `~/.claude/settings.json`:
+When `manage_claude_settings=true`, the adapter manages three environment keys in `~/.claude/settings.json`:
 
 - `ANTHROPIC_BASE_URL=http://<adapter-host>:<port>` routes inference through CC-Adapter.
-- `ANTHROPIC_API_KEY=cc-adapter-local` selects API-key authentication instead of Claude subscription authentication. The value is a non-secret local placeholder; CC-Adapter does not use it for upstream authentication.
 - `ENABLE_TOOL_SEARCH=true` overrides Claude Code's third-party-base-URL fallback and enables deferred MCP discovery.
-- `CLAUDE_STREAM_IDLE_TIMEOUT_MS=<configured value>` remains optional and unchanged.
+- `CLAUDE_STREAM_IDLE_TIMEOUT_MS=<configured value>` is optional and is left unmanaged when configured as `0`.
 
-The backup file will preserve the previous value and presence state for every key the adapter changes. Normal shutdown will restore those values exactly. Existing backup formats will remain readable.
+Automatic mode manages only `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH=true`, and optional `CLAUDE_STREAM_IDLE_TIMEOUT_MS`; it leaves `ANTHROPIC_API_KEY` untouched so signed-in Claude.ai OAuth and hosted connectors remain available.
 
-When `manage_claude_settings=false`, startup documentation and console guidance will state that the first three variables must be set by the caller, with the timeout remaining optional.
+The backup file preserves the previous value and presence state for every key the adapter changes. Normal shutdown restores those values exactly. Existing backup formats remain readable, including legacy `anthropic_api_key` sections. Without a backup ownership record, restore is a complete no-op.
+
+When `manage_claude_settings=false`, startup documentation and console guidance recommend only `ANTHROPIC_BASE_URL` and `ENABLE_TOOL_SEARCH=true`, with the timeout remaining optional.
+
+Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.
 
 ## Compatibility and Failure Handling
 
@@ -104,7 +107,7 @@ When `manage_claude_settings=false`, startup documentation and console guidance 
 
 - MCP server commands, URLs, OAuth tokens, API keys, and environment variables stay in Claude Code and its MCP processes.
 - Codex receives tool names, descriptions, JSON schemas, calls, and results only when required by the conversation.
-- The local placeholder Anthropic API key is not an Anthropic credential and must never be used as the ChatGPT upstream bearer token.
+- The optional manual placeholder Anthropic API key is not an Anthropic credential and must never be used as the ChatGPT upstream bearer token. When set, it disables Claude.ai-hosted connectors by taking precedence over Claude.ai login.
 - ChatGPT OAuth continues to be loaded exclusively from CC-Adapter's token store.
 
 ## Testing
