@@ -6,12 +6,63 @@ use uuid::Uuid;
 use crate::types::anthropic::{MessagesResponse, ResponseContentBlock, Usage};
 use crate::types::responses::{OutputContent, OutputItem, ResponsesResponse};
 
+/// 偵測 Codex SSE 串流中的上游錯誤（`event: error` 或 `response.failed`），
+/// 回傳可讀的錯誤訊息（含 code）。
+/// Detect an upstream error in the Codex SSE stream (`event: error` or
+/// `response.failed`) and return a human-readable message (with code if present).
+fn detect_upstream_error(sse_text: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for_each_sse_block(sse_text, |event_type, data| {
+        if found.is_some() {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        let jtype = v.get("type").and_then(|x| x.as_str());
+        let is_error = event_type == "error" || jtype == Some("error");
+        let is_failed = event_type == "response.failed" || jtype == Some("response.failed");
+        // 錯誤物件可能在頂層 `error`，或在 `response.error`
+        // The error object may be at top-level `error` or under `response.error`
+        let err_obj = if is_error {
+            v.get("error")
+        } else if is_failed {
+            v.get("response").and_then(|r| r.get("error"))
+        } else {
+            None
+        };
+        if let Some(err) = err_obj {
+            let msg = err
+                .get("message")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown error");
+            let code = err.get("code").and_then(|x| x.as_str());
+            found = Some(match code {
+                Some(c) if !c.is_empty() => format!("{} ({})", msg, c),
+                _ => msg.to_string(),
+            });
+        }
+    });
+    found
+}
+
 /// 從 Codex 後端 SSE 串流文字中解析完整回應，轉換為 Anthropic 格式
 /// Parse a complete response from Codex backend SSE stream text, convert to Anthropic format
 pub fn convert_responses_to_anthropic(
     sse_text: &str,
     original_model: &str,
 ) -> Result<MessagesResponse> {
+    // Codex 可能以 `event: error` 或 `response.failed` 回報上游錯誤（例如
+    // context_length_exceeded）。若不偵測，後續解析會得到空 output 並回傳空訊息，
+    // 導致 Claude Code 靜默卡住。改為明確回傳錯誤，讓上層把真正原因回報給使用者。
+    // Codex may report upstream failures via `event: error` or `response.failed`
+    // (e.g. context_length_exceeded). If undetected, parsing yields empty output
+    // and an empty message, so Claude Code hangs silently. Surface it as an error
+    // instead so the real reason reaches the user.
+    if let Some(err_msg) = detect_upstream_error(sse_text) {
+        anyhow::bail!("Codex upstream error: {}", err_msg);
+    }
+
     let mut response = parse_sse_to_response(sse_text)?;
 
     // Codex 有時 response.completed 的 output:[] 是空的，實際 output item 只在 SSE 串流事件裡
@@ -1159,6 +1210,33 @@ fn convert_status_to_stop_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_upstream_error_event_surfaces_as_err() {
+        // context_length_exceeded 以 `event: error` 回報時，必須回傳 Err 而非空訊息
+        // A context_length_exceeded reported via `event: error` must yield Err, not an empty message
+        let sse = "event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"status\":\"in_progress\"}}\n\
+\n\
+event: error\n\
+data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"Your input exceeds the context window of this model.\"}}\n\
+\n";
+        let result = convert_responses_to_anthropic(sse, "claude-fable-5");
+        assert!(result.is_err(), "expected an error, got: {:?}", result.map(|m| m.content));
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("context_length_exceeded"), "message was: {}", msg);
+        assert!(msg.contains("context window"), "message was: {}", msg);
+    }
+
+    #[test]
+    fn test_response_failed_event_surfaces_as_err() {
+        let sse = "event: response.failed\n\
+data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\
+\n";
+        let result = convert_responses_to_anthropic(sse, "claude-fable-5");
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("boom"));
+    }
 
     #[test]
     fn test_parse_completed_event() {

@@ -433,6 +433,18 @@ async fn chatgpt_streaming_with_keepalive(
                                 message = %e.message,
                                 "ChatGPT 串流前置請求失敗 / ChatGPT streaming prefetch failed"
                             );
+                            // 將錯誤以 Anthropic `error` 事件送給 Claude Code，
+                            // 否則串流會空白結束、造成使用者端靜默卡住。
+                            // Emit an Anthropic `error` event so Claude Code shows the
+                            // failure instead of hanging on an empty, silently-closed stream.
+                            let payload = serde_json::json!({
+                                "type": "error",
+                                "error": { "type": "api_error", "message": e.message }
+                            });
+                            let err_event = Event::default()
+                                .event("error")
+                                .data(payload.to_string());
+                            let _ = tx.send(Ok(err_event));
                         }
                     }
                     break;
