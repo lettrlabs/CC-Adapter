@@ -89,6 +89,22 @@ pub fn save_named(name: &str, data: &TokenData) -> Result<()> {
             path.display()
         )
     })?;
+    // Unix 上將 token 檔案權限限制為 0600（與官方 Codex CLI 一致），
+    // 避免預設 umask 導致其他使用者可讀
+    // Restrict token file to 0600 on Unix (matching the official Codex CLI)
+    // so a permissive umask can't leave it world-readable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "無法設定 token 檔案權限 / Failed to set token file permissions: {}",
+                    path.display()
+                )
+            },
+        )?;
+    }
     Ok(())
 }
 

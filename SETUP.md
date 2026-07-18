@@ -46,7 +46,14 @@ if ($p -notlike "*claude-adapter*") {
 }
 ```
 
-macOS/Linux: `cp target/release/claude-adapter ~/.local/bin/`
+macOS/Linux:
+
+```bash
+mkdir -p ~/.local/bin
+cp target/release/claude-adapter ~/.local/bin/
+# if ~/.local/bin isn't in PATH, add to ~/.zshrc:
+#   export PATH="$HOME/.local/bin:$PATH"
+```
 
 ## Step 3: Create the config
 
@@ -105,7 +112,9 @@ Any terminal *without* that variable keeps using real Claude/Anthropic.
 
 ### Optional: one-word switcher
 
-Add this to your PowerShell `$PROFILE`, then just type `claude-codex`:
+Add the version for your shell, then just type `claude-codex`.
+
+Windows — PowerShell `$PROFILE`:
 
 ```powershell
 function claude-codex {
@@ -120,6 +129,18 @@ function claude-codex {
         if ($null -ne $prev) { $env:ANTHROPIC_BASE_URL = $prev }
         else { Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue }
     }
+}
+```
+
+macOS/Linux — `~/.zshrc` (or `~/.bashrc`):
+
+```bash
+claude-codex() {
+    if ! pgrep -x claude-adapter >/dev/null 2>&1; then
+        (claude-adapter serve >/dev/null 2>&1 &)
+        sleep 2
+    fi
+    ANTHROPIC_BASE_URL="http://127.0.0.1:8080" claude "$@"
 }
 ```
 
