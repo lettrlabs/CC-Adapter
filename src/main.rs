@@ -1,4 +1,5 @@
 mod auth;
+mod claude_settings;
 mod config;
 mod convert;
 mod error;
@@ -207,111 +208,82 @@ fn claude_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
 
-/// 備份檔路徑：~/.claude-adapter/base_url_backup.json（內含 ANTHROPIC_BASE_URL 與可選的 CLAUDE_STREAM_IDLE_TIMEOUT_MS）
+/// 備份檔路徑：~/.claude-adapter/base_url_backup.json（內含所有由 adapter 管理的 env 值）
 fn backup_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude-adapter").join("base_url_backup.json"))
 }
 
-/// 依備份區段還原單一 `env` 鍵（`had_value: true` 寫回 `old_value`，`false` 則移除）
-fn restore_env_from_backup_section(
-    env: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    section: Option<&serde_json::Value>,
-) {
-    let Some(s) = section else { return };
-    match s.get("had_value").and_then(|v| v.as_bool()) {
-        Some(true) => {
-            if let Some(old) = s.get("old_value") {
-                env.insert(key.to_string(), old.clone());
-            }
-        }
-        Some(false) => {
-            env.remove(key);
-        }
-        _ => {}
-    }
+fn claude_proxy_url(host: &str, port: u16) -> String {
+    let connect_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+    format!("http://{}:{}", connect_host, port)
 }
 
-/// 將 `ANTHROPIC_BASE_URL`（及可選的 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`）注入 ~/.claude/settings.json
-fn inject_claude_settings(host: &str, port: u16, stream_idle_timeout_ms: u64) {
-    let Some(path) = claude_settings_path() else { return };
+fn write_json_with_temp_file(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let content = serde_json::to_string_pretty(value)?;
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, &content)?;
+    if std::fs::rename(&tmp_path, path).is_err() {
+        std::fs::write(path, &content)?;
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    Ok(())
+}
+
+/// 將 adapter 管理的 Claude Code `env` 值注入 ~/.claude/settings.json
+fn inject_claude_settings(host: &str, port: u16, stream_idle_timeout_ms: u64) -> bool {
+    let Some(path) = claude_settings_path() else {
+        return false;
+    };
 
     let mut settings: serde_json::Value = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or(serde_json::json!({}))
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(error = %e, "無法讀取 Claude settings.json / Failed to read Claude settings.json");
+                return false;
+            }
+        };
+        match serde_json::from_str(&content) {
+            Ok(settings) => settings,
+            Err(e) => {
+                tracing::warn!(error = %e, "Claude settings.json 不是有效 JSON，未修改 / Claude settings.json is invalid JSON; left unchanged");
+                return false;
+            }
+        }
     } else {
         serde_json::json!({})
     };
 
-    let connect_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
-    let proxy_url = format!("http://{}:{}", connect_host, port);
-
-    // 備份啟動前的 env 值，供關閉時還原
-    let old_base = settings
-        .get("env")
-        .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
-        .cloned();
-    let old_stream = settings
-        .get("env")
-        .and_then(|env| env.get("CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
-        .cloned();
-
-    if let Some(bp) = backup_path() {
-        if let Some(parent) = bp.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut backup_map = serde_json::Map::new();
-        backup_map.insert(
-            "anthropic_base_url".to_string(),
-            serde_json::json!({
-                "had_value": old_base.is_some(),
-                "old_value": old_base,
-            }),
-        );
-        if stream_idle_timeout_ms > 0 {
-            backup_map.insert(
-                "claude_stream_idle_timeout_ms".to_string(),
-                serde_json::json!({
-                    "had_value": old_stream.is_some(),
-                    "old_value": old_stream,
-                }),
-            );
-        }
-        let backup = serde_json::Value::Object(backup_map);
-        if let Ok(json) = serde_json::to_string_pretty(&backup) {
-            let _ = std::fs::write(&bp, json);
-        }
-    }
-
-    if !settings.get("env").is_some_and(|v| v.is_object()) {
-        settings["env"] = serde_json::json!({});
-    }
-    settings["env"]["ANTHROPIC_BASE_URL"] = serde_json::Value::String(proxy_url.clone());
-    if stream_idle_timeout_ms > 0 {
-        settings["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] =
-            serde_json::Value::String(stream_idle_timeout_ms.to_string());
-    }
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // 原子寫入：先寫 temp 再 rename，防止損壞
-    let tmp_path = path.with_extension("tmp");
-    match serde_json::to_string_pretty(&settings) {
-        Ok(content) => {
-            if std::fs::write(&tmp_path, &content).is_ok()
-                && std::fs::rename(&tmp_path, &path).is_err()
-            {
-                let _ = std::fs::write(&path, &content);
-            }
-        }
+    let proxy_url = claude_proxy_url(host, port);
+    let backup = match claude_settings::apply_managed_env(
+        &mut settings,
+        &proxy_url,
+        stream_idle_timeout_ms,
+    ) {
+        Ok(backup) => backup,
         Err(e) => {
-            tracing::warn!(error = %e, "無法序列化 settings.json / Failed to serialize settings.json");
-            return;
+            tracing::warn!(error = %e, "Claude settings.json env 無法安全管理，未修改 / Claude settings.json env cannot be managed safely; left unchanged");
+            return false;
         }
+    };
+
+    let Some(bp) = backup_path() else {
+        return false;
+    };
+    if let Err(e) = write_json_with_temp_file(&bp, &backup) {
+        tracing::warn!(error = %e, "無法寫入 Claude settings 備份 / Failed to write Claude settings backup");
+        return false;
+    }
+    if let Err(e) = write_json_with_temp_file(&path, &settings) {
+        tracing::warn!(error = %e, "無法寫入 Claude settings.json / Failed to write Claude settings.json");
+        return false;
     }
 
     info!(
@@ -320,66 +292,52 @@ fn inject_claude_settings(host: &str, port: u16, stream_idle_timeout_ms: u64) {
         stream_idle_ms = stream_idle_timeout_ms,
         "已注入 Claude Code env 至 settings.json / Injected Claude Code env into settings.json"
     );
+    true
 }
 
 /// 還原 ~/.claude/settings.json 中由本程式注入的 `env` 鍵
 fn restore_claude_settings() {
-    let Some(path) = claude_settings_path() else { return };
+    let Some(path) = claude_settings_path() else {
+        return;
+    };
     let Some(bp) = backup_path() else { return };
 
-    if !path.exists() { return; }
+    if !path.exists() {
+        return;
+    }
 
     let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
-        Ok(c) => serde_json::from_str(&c).unwrap_or_default(),
-        Err(_) => return,
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(settings) => settings,
+            Err(e) => {
+                tracing::warn!(error = %e, "Claude settings.json 不是有效 JSON，無法還原 / Claude settings.json is invalid JSON; cannot restore");
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "無法讀取 Claude settings.json 以還原 / Failed to read Claude settings.json for restore");
+            return;
+        }
     };
 
     let backup: Option<serde_json::Value> = std::fs::read_to_string(&bp)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
-    if let Some(env) = settings.get_mut("env").and_then(|v| v.as_object_mut()) {
-        match &backup {
-            None => {
-                // 舊行為：備份遺失時仍移除 ANTHROPIC_BASE_URL；不動 CLAUDE_STREAM_IDLE_TIMEOUT_MS
-                env.remove("ANTHROPIC_BASE_URL");
-            }
-            Some(b) => {
-                // 新版備份：anthropic_base_url + 可選 claude_stream_idle_timeout_ms
-                // 舊版備份：僅頂層 had_value / old_value → 只對應 ANTHROPIC_BASE_URL
-                let anthropic_section = b.get("anthropic_base_url").or_else(|| {
-                    b.get("had_value")
-                        .is_some()
-                        .then_some(b)
-                });
-                restore_env_from_backup_section(env, "ANTHROPIC_BASE_URL", anthropic_section);
-
-                let stream_section = b.get("claude_stream_idle_timeout_ms");
-                restore_env_from_backup_section(env, "CLAUDE_STREAM_IDLE_TIMEOUT_MS", stream_section);
-            }
-        }
-
-        if env.is_empty()
-            && let Some(obj) = settings.as_object_mut()
-        {
-            obj.remove("env");
-        }
+    if let Err(e) = claude_settings::restore_managed_env(&mut settings, backup.as_ref()) {
+        tracing::warn!(error = %e, "Claude settings.json env 無法安全還原，未修改 / Claude settings.json env cannot be restored safely; left unchanged");
+        return;
     }
 
-    let tmp_path = path.with_extension("tmp");
-    if let Ok(content) = serde_json::to_string_pretty(&settings) {
-        let _ = std::fs::write(&tmp_path, &content)
-            .and_then(|_| std::fs::rename(&tmp_path, &path));
+    if let Err(e) = write_json_with_temp_file(&path, &settings) {
+        tracing::warn!(error = %e, "無法寫入已還原的 Claude settings.json / Failed to write restored Claude settings.json");
+        return;
     }
 
     let _ = std::fs::remove_file(&bp);
 
-    eprintln!(
-        "\n  已還原 ~/.claude/settings.json — ANTHROPIC_BASE_URL（與可選的 CLAUDE_STREAM_IDLE_TIMEOUT_MS）已還原"
-    );
-    eprintln!(
-        "  Restored ~/.claude/settings.json — ANTHROPIC_BASE_URL (and optional CLAUDE_STREAM_IDLE_TIMEOUT_MS) restored\n"
-    );
+    eprintln!("\n  已還原 ~/.claude/settings.json — adapter 管理的 Claude Code env 已還原");
+    eprintln!("  Restored ~/.claude/settings.json — adapter-managed Claude Code env restored\n");
 }
 
 /// 啟動 Adapter 代理伺服器
@@ -410,15 +368,17 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // 注入 ANTHROPIC_BASE_URL（可透過 manage_claude_settings = false 停用）
-    // Inject ANTHROPIC_BASE_URL (disable with manage_claude_settings = false)
-    if config.server.manage_claude_settings {
+    // 注入 adapter 管理的 Claude Code env（可透過 manage_claude_settings = false 停用）
+    // Inject adapter-managed Claude Code env (disable with manage_claude_settings = false)
+    let claude_settings_managed = if config.server.manage_claude_settings {
         inject_claude_settings(
             &config.server.host,
             config.server.port,
             config.server.claude_stream_idle_timeout_ms,
-        );
-    }
+        )
+    } else {
+        false
+    };
 
     // 啟動 config.toml 檔案監控任務（背景輪詢 mtime）
     // Spawn config.toml file watcher task (background mtime polling)
@@ -450,14 +410,17 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
             println!("    {} → {} ({})", anthropic, route.model, route.provider);
         }
     }
-    if config.server.manage_claude_settings {
-        println!("\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL{}", if config.server.claude_stream_idle_timeout_ms > 0 {
-            "、CLAUDE_STREAM_IDLE_TIMEOUT_MS"
-        } else {
-            ""
-        });
+    if claude_settings_managed {
         println!(
-            "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL{}",
+            "\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL、ANTHROPIC_API_KEY、ENABLE_TOOL_SEARCH{}",
+            if config.server.claude_stream_idle_timeout_ms > 0 {
+                "、CLAUDE_STREAM_IDLE_TIMEOUT_MS"
+            } else {
+                ""
+            }
+        );
+        println!(
+            "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ENABLE_TOOL_SEARCH{}",
             if config.server.claude_stream_idle_timeout_ms > 0 {
                 ", CLAUDE_STREAM_IDLE_TIMEOUT_MS"
             } else {
@@ -474,10 +437,24 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
         println!("  直接開啟新終端執行 claude 即可使用，無需任何環境變數或 shell hook");
         println!("  Just open a new terminal and run `claude` — no env vars or shell hooks needed");
     } else {
-        println!("\n  未修改 ~/.claude/settings.json（manage_claude_settings = false）");
-        println!("  ~/.claude/settings.json left untouched (manage_claude_settings = false)");
-        println!("  要使用本代理，請在 shell 中設定 ANTHROPIC_BASE_URL=http://{} 後執行 claude", addr);
-        println!("  To use this proxy, set ANTHROPIC_BASE_URL=http://{} in your shell, then run claude", addr);
+        if config.server.manage_claude_settings {
+            println!("\n  無法安全修改 ~/.claude/settings.json；請改用目前 shell 的環境變數");
+            println!(
+                "  Could not safely update ~/.claude/settings.json; use process environment variables in the current shell"
+            );
+        } else {
+            println!("\n  未修改 ~/.claude/settings.json（manage_claude_settings = false）");
+            println!("  ~/.claude/settings.json left untouched (manage_claude_settings = false)");
+        }
+        let proxy_url = claude_proxy_url(&config.server.host, config.server.port);
+        println!("  要使用本代理，請設定以下變數後執行 claude：");
+        println!("  To use this proxy, set these variables, then run `claude`:");
+        println!("    ANTHROPIC_BASE_URL={}", proxy_url);
+        println!("    ANTHROPIC_API_KEY={}", claude_settings::LOCAL_API_KEY);
+        println!(
+            "    ENABLE_TOOL_SEARCH={}",
+            claude_settings::TOOL_SEARCH_ENABLED
+        );
     }
     println!("\n  ⟳ 支援熱重載：修改 config.toml 後自動生效，無需重啟");
     println!("  ⟳ Hot-reload enabled: changes to config.toml take effect automatically");
@@ -494,7 +471,7 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // 伺服器關閉後還原 ~/.claude/settings.json
     // Restore ~/.claude/settings.json after server shutdown
-    if config.server.manage_claude_settings {
+    if claude_settings_managed {
         restore_claude_settings();
     }
 
