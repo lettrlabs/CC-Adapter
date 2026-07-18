@@ -36,8 +36,21 @@ impl JsonFileWriter for AtomicJsonFileWriter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let destination = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Failed to resolve JSON file symlink '{}': {}",
+                        path.display(),
+                        error
+                    )
+                })?,
+            Ok(_) => path.to_path_buf(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+            Err(error) => return Err(error.into()),
+        };
         let content = serde_json::to_vec_pretty(value)?;
-        let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+        let mut file = atomic_write_file::AtomicWriteFile::open(destination)?;
         file.write_all(&content)?;
         file.commit()?;
         Ok(())
@@ -538,5 +551,30 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read(&paths.settings).unwrap(), injected_settings);
         assert_eq!(std::fs::read(&paths.backup).unwrap(), backup);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writer_preserves_settings_symlink_and_updates_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(&temp);
+        let target = temp.path().join("shared-settings.json");
+        write_json(&target, &json!({"env": {"UNRELATED": "original"}}));
+        std::fs::create_dir_all(paths.settings.parent().unwrap()).unwrap();
+        symlink(&target, &paths.settings).unwrap();
+
+        AtomicJsonFileWriter
+            .write_json(&paths.settings, &json!({"env": {"UNRELATED": "updated"}}))
+            .unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&paths.settings)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_json(&target), json!({"env": {"UNRELATED": "updated"}}));
     }
 }

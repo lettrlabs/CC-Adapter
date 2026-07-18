@@ -107,7 +107,17 @@ fn restore_api_key(env: &mut Map<String, Value>, section: Option<&Value>) {
             }
         }
         Some(false) => {}
-        None => restore_section(env, API_KEY_ENV, Some(section)),
+        None => match section.get("had_value").and_then(Value::as_bool) {
+            Some(true) => {
+                if let Some(old_value) = section.get("old_value") {
+                    env.insert(API_KEY_ENV.to_string(), old_value.clone());
+                }
+            }
+            Some(false) if env.get(API_KEY_ENV).and_then(Value::as_str) == Some(LOCAL_API_KEY) => {
+                env.remove(API_KEY_ENV);
+            }
+            _ => {}
+        },
     }
 }
 
@@ -361,6 +371,31 @@ mod tests {
         let legacy = json!({
             "env_was_present": true,
             "anthropic_api_key": {"injected": true}
+        });
+        let mut unchanged_dummy = json!({
+            "env": {"ANTHROPIC_API_KEY": "cc-adapter-local", "UNRELATED": "keep"}
+        });
+        let mut replaced_dummy = json!({
+            "env": {"ANTHROPIC_API_KEY": "manually-replaced", "UNRELATED": "keep"}
+        });
+
+        restore_managed_env(&mut unchanged_dummy, Some(&legacy)).unwrap();
+        restore_managed_env(&mut replaced_dummy, Some(&legacy)).unwrap();
+
+        assert_eq!(unchanged_dummy, json!({"env": {"UNRELATED": "keep"}}));
+        assert_eq!(
+            replaced_dummy,
+            json!({
+                "env": {"ANTHROPIC_API_KEY": "manually-replaced", "UNRELATED": "keep"}
+            })
+        );
+    }
+
+    #[test]
+    fn legacy_absent_api_key_backup_removes_only_unchanged_adapter_dummy() {
+        let legacy = json!({
+            "env_was_present": true,
+            "anthropic_api_key": {"had_value": false, "old_value": null}
         });
         let mut unchanged_dummy = json!({
             "env": {"ANTHROPIC_API_KEY": "cc-adapter-local", "UNRELATED": "keep"}

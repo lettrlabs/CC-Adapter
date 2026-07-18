@@ -270,25 +270,45 @@ fn collect_tool_result_parts(
 }
 
 fn collect_referenced_tool_names(messages: &[Message]) -> HashSet<String> {
+    let mut tool_search_uses = HashSet::new();
     let mut referenced = HashSet::new();
     for message in messages {
         if let MessageContent::Blocks(blocks) = &message.content {
-            collect_references_from_blocks(blocks, &mut referenced);
+            collect_references_from_history_blocks(
+                blocks,
+                false,
+                &mut tool_search_uses,
+                &mut referenced,
+            );
         }
     }
     referenced
 }
 
-fn collect_references_from_blocks(blocks: &[ContentBlock], referenced: &mut HashSet<String>) {
+fn collect_references_from_history_blocks(
+    blocks: &[ContentBlock],
+    accept_direct_references: bool,
+    tool_search_uses: &mut HashSet<String>,
+    referenced: &mut HashSet<String>,
+) {
     for block in blocks {
         match block {
-            ContentBlock::ToolReference { tool_name } => {
+            ContentBlock::ToolReference { tool_name } if accept_direct_references => {
                 referenced.insert(tool_name.clone());
             }
+            ContentBlock::ToolUse { id, name, .. } if name == "ToolSearch" => {
+                tool_search_uses.insert(id.clone());
+            }
             ContentBlock::ToolResult {
+                tool_use_id,
                 content: Some(ToolResultContent::Blocks(nested)),
-                ..
-            } => collect_references_from_blocks(nested, referenced),
+                is_error,
+            } => collect_references_from_history_blocks(
+                nested,
+                is_error != &Some(true) && tool_search_uses.contains(tool_use_id),
+                tool_search_uses,
+                referenced,
+            ),
             _ => {}
         }
     }
@@ -539,15 +559,117 @@ mod tests {
     }
 
     #[test]
-    fn preserves_text_and_renders_nested_tool_references() {
+    fn top_level_tool_reference_does_not_unlock_a_deferred_tool() {
+        let request = test_request(
+            vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolReference {
+                    tool_name: "tool_2".to_string(),
+                }]),
+            }],
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch"]);
+    }
+
+    #[test]
+    fn unrelated_tool_result_does_not_unlock_a_deferred_tool() {
         let messages = vec![
             Message {
                 role: "assistant".to_string(),
                 content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                    id: "toolu_search".to_string(),
-                    name: "ToolSearch".to_string(),
-                    input: json!({"query": "browser"}),
+                    id: "toolu_other".to_string(),
+                    name: "LookupSomethingElse".to_string(),
+                    input: json!({}),
                 }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_other".to_string(),
+                    content: Some(ToolResultContent::Blocks(vec![
+                        ContentBlock::ToolReference {
+                            tool_name: "tool_2".to_string(),
+                        },
+                    ])),
+                    is_error: None,
+                }]),
+            },
+        ];
+        let request = test_request(
+            messages,
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch"]);
+    }
+
+    #[test]
+    fn errored_tool_search_result_does_not_unlock_a_deferred_tool() {
+        let mut messages = discovery_history(&["tool_2"]);
+        let MessageContent::Blocks(result_blocks) = &mut messages[2].content else {
+            panic!("expected tool result blocks");
+        };
+        let ContentBlock::ToolResult { is_error, .. } = &mut result_blocks[0] else {
+            panic!("expected tool result");
+        };
+        *is_error = Some(true);
+        let request = test_request(
+            messages,
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch"]);
+    }
+
+    #[test]
+    fn preserves_text_and_renders_nested_tool_references() {
+        let messages = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "toolu_search".to_string(),
+                        name: "ToolSearch".to_string(),
+                        input: json!({"query": "browser"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "nested_search".to_string(),
+                        name: "ToolSearch".to_string(),
+                        input: json!({"query": "nested browser"}),
+                    },
+                ]),
             },
             Message {
                 role: "user".to_string(),
