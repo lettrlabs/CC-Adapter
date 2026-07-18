@@ -5,3 +5,4 @@ Cargo.lockdist/
 /dist
 /.omc
 /.claude
+/.worktrees/
