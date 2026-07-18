@@ -349,7 +349,9 @@ async fn chatgpt_to_anthropic_messages(
 
     convert_responses_to_anthropic(&sse_text, original_model).map_err(|e| {
         error!(error = %e, "Responses API 回應轉換失敗 / Responses API response conversion failed");
-        AppError::internal(format!("Responses API response conversion failed: {}", e))
+        // 輸入類錯誤（超出上下文長度等）以 400 回應，避免 Claude Code 反覆重試
+        // Input-side errors (context length exceeded, etc.) map to 400 so Claude Code doesn't retry
+        AppError::from_upstream(format!("{}", e))
     })
 }
 
@@ -435,11 +437,18 @@ async fn chatgpt_streaming_with_keepalive(
                             );
                             // 將錯誤以 Anthropic `error` 事件送給 Claude Code，
                             // 否則串流會空白結束、造成使用者端靜默卡住。
+                            // 輸入類錯誤標記為 invalid_request_error，避免客戶端重試。
                             // Emit an Anthropic `error` event so Claude Code shows the
                             // failure instead of hanging on an empty, silently-closed stream.
+                            // Tag input-side errors as invalid_request_error so the client won't retry.
+                            let err_type = if crate::error::is_non_retryable_upstream(&e.message) {
+                                "invalid_request_error"
+                            } else {
+                                "api_error"
+                            };
                             let payload = serde_json::json!({
                                 "type": "error",
-                                "error": { "type": "api_error", "message": e.message }
+                                "error": { "type": err_type, "message": e.message }
                             });
                             let err_event = Event::default()
                                 .event("error")
