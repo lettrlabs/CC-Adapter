@@ -68,9 +68,7 @@ pub enum MessageContent {
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -86,13 +84,9 @@ pub enum ContentBlock {
         is_error: Option<bool>,
     },
     #[serde(rename = "tool_reference")]
-    ToolReference {
-        tool_name: String,
-    },
+    ToolReference { tool_name: String },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -248,7 +242,8 @@ mod tests {
                 "input_schema": {"type": "object"},
                 "defer_loading": true
             }]
-        })).unwrap();
+        }))
+        .unwrap();
 
         let tool = &request.tools.as_ref().unwrap()[0];
         assert_eq!(tool.defer_loading, Some(true));
@@ -256,8 +251,10 @@ mod tests {
         let MessageContent::Blocks(message_blocks) = &request.messages[0].content else {
             panic!("expected structured message content");
         };
-        let ContentBlock::ToolResult { content: Some(ToolResultContent::Blocks(result)), .. } =
-            &message_blocks[0]
+        let ContentBlock::ToolResult {
+            content: Some(ToolResultContent::Blocks(result)),
+            ..
+        } = &message_blocks[0]
         else {
             panic!("expected structured tool result");
         };

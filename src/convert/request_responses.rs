@@ -4,12 +4,12 @@ use anyhow::Result;
 use tracing::debug;
 
 use crate::types::anthropic::{
-    ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt,
-    ToolDefinition, ToolResultContent,
+    ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt, ToolDefinition,
+    ToolResultContent,
 };
 use crate::types::responses::{
-    InputContent, InputContentPart, InputItem, ReasoningConfig, ResponsesRequest,
-    ResponsesTool, TextConfig,
+    InputContent, InputContentPart, InputItem, ReasoningConfig, ResponsesRequest, ResponsesTool,
+    TextConfig,
 };
 
 /// ChatGPT Codex `codex/responses` 要求請求必須帶非空 `instructions`（對應 system）
@@ -176,10 +176,7 @@ fn convert_user_blocks(blocks: &[ContentBlock], out: &mut Vec<InputItem>) -> Res
                 content_parts.push(InputContentPart::Text { text: text.clone() });
             }
             ContentBlock::Image { source } => {
-                let data_url = format!(
-                    "data:{};base64,{}",
-                    source.media_type, source.data
-                );
+                let data_url = format!("data:{};base64,{}", source.media_type, source.data);
                 content_parts.push(InputContentPart::Image {
                     image_url: data_url,
                     detail: Some("auto".to_string()),
@@ -230,10 +227,7 @@ fn convert_user_blocks(blocks: &[ContentBlock], out: &mut Vec<InputItem>) -> Res
 
     // 每個 tool_result → function_call_output
     for (call_id, output, _) in tool_results {
-        out.push(InputItem::FunctionCallOutput {
-            call_id,
-            output,
-        });
+        out.push(InputItem::FunctionCallOutput { call_id, output });
     }
 
     Ok(())
@@ -309,9 +303,7 @@ fn convert_tools(tools: &[ToolDefinition], referenced: &HashSet<String>) -> Vec<
         .count();
     let converted = tools
         .iter()
-        .filter(|tool| {
-            tool.defer_loading != Some(true) || referenced.contains(&tool.name)
-        })
+        .filter(|tool| tool.defer_loading != Some(true) || referenced.contains(&tool.name))
         .map(|tool| ResponsesTool {
             tool_type: "function".to_string(),
             name: tool.name.clone(),
@@ -507,7 +499,10 @@ mod tests {
         });
         let request = test_request(
             messages,
-            vec![test_tool("ToolSearch", None), test_tool("tool_2", Some(true))],
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
         );
         let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
         let names: Vec<_> = converted
@@ -578,7 +573,10 @@ mod tests {
         ];
         let request = test_request(
             messages,
-            vec![test_tool("ToolSearch", None), test_tool("tool_2", Some(true))],
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
         );
 
         let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
