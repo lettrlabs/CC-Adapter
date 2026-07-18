@@ -1,10 +1,17 @@
 [server]
 host = "127.0.0.1"
 port = 8080
-# 是否自動管理 ~/.claude/settings.json（注入/還原 ANTHROPIC_BASE_URL）。預設 true。
-# 設為 false 時不修改 Claude 設定；改在 shell 中設定 ANTHROPIC_BASE_URL 以按終端選用。
-# Whether to auto-manage ~/.claude/settings.json (inject/restore ANTHROPIC_BASE_URL). Default true.
-# Set false to leave Claude settings untouched and opt in per shell via ANTHROPIC_BASE_URL.
+# 是否自動管理 ~/.claude/settings.json。預設 true；會設定 ANTHROPIC_BASE_URL、ENABLE_TOOL_SEARCH，
+# 並僅在 ANTHROPIC_API_KEY 不存在時注入非機密的 cc-adapter-local。
+# 以獨佔鎖、無機密備份中繼資料及原子寫入管理；正常結束時精確還原，殘留備份則在下次啟動復原。
+# 若由另一個 adapter 持有或無法安全管理，不修改設定並顯示手動 shell 指令。
+# Whether to auto-manage ~/.claude/settings.json. Default true; manages ANTHROPIC_BASE_URL and
+# ENABLE_TOOL_SEARCH, and injects the non-secret cc-adapter-local ANTHROPIC_API_KEY only when absent.
+# Uses exclusive ownership, secret-free backup metadata, and atomic writes; restores exactly on
+# normal shutdown, with stale-backup recovery on the next start. If safe management is unavailable,
+# settings stay untouched and manual per-shell instructions are printed.
+# Set false to leave Claude settings untouched; manually set ANTHROPIC_BASE_URL,
+# ANTHROPIC_API_KEY, and ENABLE_TOOL_SEARCH in each shell that runs Claude Code.
 # manage_claude_settings = true
 # 日誌等級：trace, debug, info, warn, error
 # Log level: trace, debug, info, warn, error
@@ -17,9 +24,18 @@ log_file = "adapter.log"
 # 是否啟用寫入日誌檔案（預設 true）：設為 false 時，即使有設定 log_file 也不會寫入檔案
 # Whether to enable writing logs to file (default true): when false, logs are not written to file even if log_file is set
 log_file_enabled = false
-# Claude Code 串流閒置逾時（毫秒）：寫入 ~/.claude/settings.json 的 env，停止 adapter 時與 ANTHROPIC_BASE_URL 一併還原。預設 300000（5 分鐘）。設為 0 則不注入、不備份還原此變數。
-# Claude Code stream idle timeout (ms): written to ~/.claude/settings.json env; restored on shutdown with ANTHROPIC_BASE_URL. Default 300000 (5 min). Use 0 to skip.
+# Claude Code 串流閒置逾時（毫秒）：選用的受管理 env。預設 300000（5 分鐘）；設為 0 則完全不管理此變數。
+# Claude Code stream idle timeout (ms): optional managed env. Default 300000 (5 min); use 0 to leave it completely unmanaged.
 # claude_stream_idle_timeout_ms = 300000
+
+# MCP 與本機 Tool Search 的執行邊界：Claude Code 管理 MCP 連線、程序、憑證、權限、工具呼叫與結果。
+# Adapter 不連線 MCP，也不需要在 ChatGPT 重複設定 connector/MCP。Claude Code 傳送含 defer_loading
+# 的完整目錄；Adapter 僅轉送非延遲工具與歷史中 tool_reference 指定的精確 schema。
+# MCP/local Tool Search boundary: Claude Code owns MCP connections, processes, credentials,
+# permissions, calls, and results. The adapter never connects to MCP and needs no duplicate
+# ChatGPT connector/MCP setup. It forwards only non-deferred schemas plus exact tool_reference
+# selections from the full catalog sent with defer_loading metadata. Clients without defer_loading
+# retain legacy all-tools behavior; discovery stays stateless because each request includes history.
 
 # ---------------------------------------------------------------------------
 # 供應商配置 / Provider configuration

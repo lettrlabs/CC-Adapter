@@ -4,6 +4,14 @@ You are installing **CC-Adapter** (Claude API Adapter) — a local proxy that tr
 
 Repository: https://github.com/Jakevin/CC-Adapter
 
+## MCP ownership and quota
+
+Claude Code remains the MCP client and orchestrator. It owns MCP connections and server processes, credentials, permissions, its local Tool Search, tool calls, and tool-result delivery. CC-Adapter never connects to or executes tools on MCP servers, and no duplicate ChatGPT connector/MCP configuration is required.
+
+Claude Code sends CC-Adapter the complete catalog with `defer_loading` metadata. For ChatGPT/Codex, the adapter forwards only non-deferred schemas plus exact schemas selected by `tool_reference` blocks in the request's conversation history. This discovery is stateless: history is included in each request, so previously referenced schemas remain loaded on subsequent turns. The filtering avoids Responses API context-window failures from eagerly forwarding a large MCP catalog. Clients without `defer_loading` keep the legacy all-tools behavior. This is Claude Code's local Tool Search, not OpenAI hosted tool search.
+
+Model requests use the selected configured provider's quota. ChatGPT/Codex routes consume the configured ChatGPT/Codex provider quota, not Claude Code model credits or Anthropic model quota; Claude Code's MCP orchestration remains local even though model inference is routed.
+
 ## Prerequisites
 
 - macOS (arm64 / amd64), Linux (arm64 / amd64), or Windows (amd64)
@@ -217,9 +225,11 @@ ADAPTER_API_KEY=sk-xxx claude-adapter serve --config ~/.config/claude-adapter/co
 
 The adapter will:
 1. Start listening on `http://127.0.0.1:8080`
-2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, and (unless `[server] claude_stream_idle_timeout_ms = 0` in config) with `CLAUDE_STREAM_IDLE_TIMEOUT_MS` for a longer stream idle timeout (default 300000 ms)
+2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` (injecting `cc-adapter-local` only if the key is absent), `ENABLE_TOOL_SEARCH=true`, and optionally `CLAUDE_STREAM_IDLE_TIMEOUT_MS` (default 300000 ms; set `[server] claude_stream_idle_timeout_ms = 0` to leave it unmanaged)
 3. Hot-reload `config.toml` changes automatically while running
-4. Restore the previous `env` values from backup when stopped gracefully (Ctrl+C / SIGTERM / SIGHUP)
+4. Restore the exact previous presence and values of managed `env` keys on normal shutdown (Ctrl+C / SIGTERM / SIGHUP)
+
+Automatic management leaves an existing `ANTHROPIC_API_KEY` value untouched and never serializes it into backup. It uses an exclusive ownership lock, secret-free backup metadata, and atomic writes. A stale backup left by an abrupt stop or power loss is restored on the next adapter startup before fresh settings are applied. If another adapter owns the settings or safe management fails, this process does not mutate `settings.json`; it prints the manual per-shell configuration instead.
 
 ## Step 4: Verify
 
@@ -238,6 +248,39 @@ claude
 
 No extra environment variables needed. The adapter auto-configured everything in Step 3.
 
+Do not add the Claude Code MCP servers to ChatGPT. Claude Code retains the MCP connections and permissions, performs local Tool Search and tool calls, and returns tool results through the adapter's normal protocol conversion.
+
+### Manual mode (`manage_claude_settings = false`)
+
+To leave `~/.claude/settings.json` untouched, add this to the config:
+
+```toml
+[server]
+manage_claude_settings = false
+```
+
+Start the adapter, then set all three required values in the shell that will run Claude Code. `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional.
+
+PowerShell:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
+$env:ANTHROPIC_API_KEY = "cc-adapter-local"
+$env:ENABLE_TOOL_SEARCH = "true"
+claude
+```
+
+POSIX shell:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_API_KEY=cc-adapter-local
+export ENABLE_TOOL_SEARCH=true
+claude
+```
+
+Use the adapter's actual host and port if they differ from `127.0.0.1:8080`.
+
 ## Troubleshooting
 
 - **"connection refused"**: Adapter is not running. Start it first (Step 3).
@@ -245,6 +288,8 @@ No extra environment variables needed. The adapter auto-configured everything in
 - **API key errors**: Check that `api_key` in config.toml is correct, or set `ADAPTER_API_KEY` env var.
 - **ChatGPT token expired**: Run `claude-adapter login` again.
 - **Port conflict**: Change `port` in config.toml or use `--port <PORT>` flag.
+- **Settings were not auto-configured**: Another adapter may own the exclusive settings lock, or the settings file could not be managed safely. Use the manual per-shell values printed at startup; the adapter leaves the file unchanged in this mode.
+- **Adapter stopped abruptly**: Restart it once to run stale-backup recovery. Recovery occurs on the next startup; it is not guaranteed at the moment of power loss.
 
 ## Docker Alternative
 

@@ -19,6 +19,12 @@ The adapter runs a local HTTP server that:
 4. Converts the response back to Anthropic format
 5. Returns the result to Claude Code
 
+### MCP and Tool Search boundary
+
+Claude Code remains the MCP client and orchestrator. It owns MCP connections and server processes, credentials, permissions, its local Tool Search, tool calls, and tool-result delivery. CC-Adapter never connects to MCP servers or executes MCP tools, so the same MCP servers do not need to be configured again as ChatGPT connectors or MCP servers.
+
+Claude Code still sends the complete tool catalog to the adapter, including `defer_loading` metadata. For ChatGPT/Codex Responses requests, CC-Adapter forwards only non-deferred schemas plus the exact deferred schemas selected by `tool_reference` blocks in the supplied conversation history. Discovery is stateless in the adapter: because Claude Code includes conversation history with every request, a previously referenced tool stays available on later turns without an adapter-side session store. This prevents Responses API context-window failures caused by eagerly forwarding a large MCP catalog. Clients that do not send `defer_loading` retain the legacy behavior in which all tool schemas are forwarded.
+
 **Supported providers:**
 - **OpenAI** — via API key + Chat Completions API
 - **Grok (xAI)** — via API key + Chat Completions API
@@ -29,6 +35,7 @@ The adapter runs a local HTTP server that:
 **Supported features:**
 - Text messages and multi-turn conversations
 - Tool Use / Function Calling (full round-trip conversion)
+- Lazy MCP schema routing through Claude Code's local Tool Search (ChatGPT/Codex)
 - System prompts
 - Image inputs (base64)
 - Configurable model mapping
@@ -88,10 +95,11 @@ You can configure **multiple providers at the same time** in `config.toml`, then
 [server]
 host = "127.0.0.1"
 port = 8080
+# manage_claude_settings = true   # set false to leave ~/.claude/settings.json untouched and configure each shell manually
 log_level = "info"
 log_file = "adapter.log"
 # log_file_enabled = true   # set to false to disable writing logs to file (default: true)
-# claude_stream_idle_timeout_ms = 300000   # optional: ms written to ~/.claude/settings.json env; restored on shutdown. Default 300000 (5 min). Use 0 to skip injection and backup.
+# claude_stream_idle_timeout_ms = 300000   # optional managed env value. Default 300000 (5 min); use 0 to leave it unmanaged.
 
 [providers.chatgpt]
 type = "chatgpt"
@@ -208,13 +216,48 @@ ADAPTER_API_KEY=sk-xxx ./target/release/claude-adapter
 
 ### 5. Use with Claude Code
 
-On startup the adapter updates `~/.claude/settings.json` with at least `ANTHROPIC_BASE_URL` pointing at the adapter, and (unless `[server] claude_stream_idle_timeout_ms = 0`) `CLAUDE_STREAM_IDLE_TIMEOUT_MS` for a longer stream idle timeout (default 300000 ms). No manual env vars or shell hooks are required. On graceful exit, previous values are restored from a backup (same keys).
+With the default `[server] manage_claude_settings = true`, startup automatically manages these values in `~/.claude/settings.json`:
+
+- `ANTHROPIC_BASE_URL` points Claude Code at CC-Adapter.
+- `ANTHROPIC_API_KEY` selects gateway API-key authentication. An existing value is left untouched; the non-secret local placeholder `cc-adapter-local` is injected only when the key is absent.
+- `ENABLE_TOOL_SEARCH=true` keeps Claude Code's local Tool Search enabled when using a custom base URL.
+- `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional. It is managed when `claude_stream_idle_timeout_ms` is greater than `0` (default `300000` ms) and left alone when set to `0`.
+
+Settings management takes an exclusive ownership lock, stores secret-free backup metadata (never an existing API-key value), and uses atomic file replacement. On normal shutdown, it restores the exact previous presence and values of the settings it managed. If an earlier run left a stale backup, the next startup restores it before applying a fresh configuration; this is the implemented recovery path after an abrupt stop or power loss. If another adapter owns the lock or settings cannot be managed safely, CC-Adapter does not mutate the settings file and prints the manual per-shell configuration instead.
 
 Then open a new terminal and run:
 
 ```bash
 claude
 ```
+
+#### Manual per-shell configuration
+
+Set `[server] manage_claude_settings = false` to leave `~/.claude/settings.json` untouched. Start the adapter, then opt in from the shell where Claude Code will run.
+
+PowerShell:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
+$env:ANTHROPIC_API_KEY = "cc-adapter-local"
+$env:ENABLE_TOOL_SEARCH = "true"
+claude
+```
+
+POSIX shell:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_API_KEY=cc-adapter-local
+export ENABLE_TOOL_SEARCH=true
+claude
+```
+
+`CLAUDE_STREAM_IDLE_TIMEOUT_MS` remains optional in manual mode. Adjust the URL if the adapter listens on another host or port.
+
+#### Usage quota
+
+Routed model requests consume the selected provider's quota. In particular, ChatGPT/Codex routes use the configured ChatGPT/Codex provider quota, not Claude Code model credits or Anthropic model quota. Claude Code still performs local orchestration and all MCP work; only model inference is routed through CC-Adapter.
 
 ## Provider Examples
 
@@ -284,10 +327,12 @@ docker run -d -p 8080:8080 \
   claude-adapter
 ```
 
-The container listens on `0.0.0.0:8080` by default. Point Claude Code at the adapter by setting:
+The container listens on `0.0.0.0:8080` by default. Automatic host settings management normally cannot reach the host's `~/.claude/settings.json` from the container, so configure the Claude Code shell manually:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://<docker-host>:8080
+export ANTHROPIC_API_KEY=cc-adapter-local
+export ENABLE_TOOL_SEARCH=true
 claude
 ```
 
@@ -342,7 +387,11 @@ Global Options:
 | `messages[role=assistant]` | `input[type=message, role=assistant]` |
 | Content block `tool_use` | `input[type=function_call]` |
 | Content block `tool_result` | `input[type=function_call_output]` |
-| `tools` | `tools` (function type) |
+| Non-deferred `tools` | `tools` (function type) |
+| `tools[].defer_loading=true` | Omitted until selected by history |
+| Nested `tool_reference` | Matching deferred schema is added; result becomes a function output summary |
+
+`tool_reference` discovery is performed by Claude Code's local Tool Search. This adapter does not use OpenAI hosted tool search and does not connect to MCP servers.
 
 ### Response Mapping (Provider → Anthropic)
 
