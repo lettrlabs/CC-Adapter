@@ -62,8 +62,8 @@ pub enum MessageContent {
     Blocks(Vec<ContentBlock>),
 }
 
-/// 內容區塊：依 type 欄位區分為文字、工具呼叫、工具結果、圖片、思考等類型
-/// Content block: discriminated by `type` field into text, tool_use, tool_result, image, thinking
+/// 內容區塊：依 type 欄位區分為文字、工具呼叫、工具結果、工具參考、圖片、思考等類型
+/// Content block: discriminated by `type` field into text, tool_use, tool_result, tool_reference, image, thinking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
