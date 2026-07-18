@@ -219,11 +219,13 @@ ADAPTER_API_KEY=sk-xxx ./target/release/claude-adapter
 With the default `[server] manage_claude_settings = true`, startup automatically manages these values in `~/.claude/settings.json`:
 
 - `ANTHROPIC_BASE_URL` points Claude Code at CC-Adapter.
-- `ANTHROPIC_API_KEY` selects gateway API-key authentication. An existing value is left untouched; the non-secret local placeholder `cc-adapter-local` is injected only when the key is absent.
+- `ANTHROPIC_API_KEY` selects Claude Code's API-key routing mode. An existing value is left untouched; the non-secret local placeholder `cc-adapter-local` is injected only when the key is absent. The placeholder is not an adapter or upstream-provider credential and is not forwarded as provider authentication.
 - `ENABLE_TOOL_SEARCH=true` keeps Claude Code's local Tool Search enabled when using a custom base URL.
 - `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional. It is managed when `claude_stream_idle_timeout_ms` is greater than `0` (default `300000` ms) and left alone when set to `0`.
 
-Settings management takes an exclusive ownership lock, stores secret-free backup metadata (never an existing API-key value), and uses atomic file replacement. On normal shutdown, it restores the exact previous presence and values of the settings it managed. If an earlier run left a stale backup, the next startup restores it before applying a fresh configuration; this is the implemented recovery path after an abrupt stop or power loss. If another adapter owns the lock or settings cannot be managed safely, CC-Adapter does not mutate the settings file and prints the manual per-shell configuration instead.
+Settings management takes an exclusive ownership lock and writes each backup or settings file with atomic replacement. The backup does not serialize an existing `ANTHROPIC_API_KEY`; it does preserve prior values of other managed keys needed for restoration. On normal shutdown, the adapter restores the exact previous presence and values of the settings it managed. If an earlier run left a stale backup, the next startup restores it before applying a fresh configuration; this is the implemented recovery path after an abrupt stop or power loss.
+
+If another adapter owns the lock, CC-Adapter leaves settings untouched and prints the manual per-shell configuration. If a later settings-lifecycle step fails, the adapter also falls back to manual mode and retains any recoverable backup state. Stale recovery may already have restored the original settings before a later backup-cleanup or fresh-application error, so the multi-file lifecycle is not transactional.
 
 Then open a new terminal and run:
 

@@ -229,7 +229,9 @@ The adapter will:
 3. Hot-reload `config.toml` changes automatically while running
 4. Restore the exact previous presence and values of managed `env` keys on normal shutdown (Ctrl+C / SIGTERM / SIGHUP)
 
-Automatic management leaves an existing `ANTHROPIC_API_KEY` value untouched and never serializes it into backup. It uses an exclusive ownership lock, secret-free backup metadata, and atomic writes. A stale backup left by an abrupt stop or power loss is restored on the next adapter startup before fresh settings are applied. If another adapter owns the settings or safe management fails, this process does not mutate `settings.json`; it prints the manual per-shell configuration instead.
+Automatic management leaves an existing `ANTHROPIC_API_KEY` value untouched and never serializes it into backup; prior values of other managed keys are stored for restoration. It uses an exclusive ownership lock and atomic replacement for each backup or settings-file write. A stale backup left by an abrupt stop or power loss is restored on the next adapter startup before fresh settings are applied.
+
+Lock contention leaves `settings.json` untouched and prints the manual per-shell configuration. A later lifecycle failure also falls back to manual mode and retains any recoverable backup state, but the lifecycle is not a transaction across both files: stale recovery may already have restored the original settings before a later backup-cleanup or fresh-application error.
 
 ## Step 4: Verify
 
@@ -288,7 +290,7 @@ Use the adapter's actual host and port if they differ from `127.0.0.1:8080`.
 - **API key errors**: Check that `api_key` in config.toml is correct, or set `ADAPTER_API_KEY` env var.
 - **ChatGPT token expired**: Run `claude-adapter login` again.
 - **Port conflict**: Change `port` in config.toml or use `--port <PORT>` flag.
-- **Settings were not auto-configured**: Another adapter may own the exclusive settings lock, or the settings file could not be managed safely. Use the manual per-shell values printed at startup; the adapter leaves the file unchanged in this mode.
+- **Settings were not auto-configured**: If another adapter owns the exclusive lock, this process leaves settings unchanged. For other lifecycle errors, use the manual per-shell values printed at startup and leave any backup file in place for recovery; stale recovery may already have restored the original settings before the error. Check the warning log for the exact failure.
 - **Adapter stopped abruptly**: Restart it once to run stale-backup recovery. Recovery occurs on the next startup; it is not guaranteed at the moment of power loss.
 
 ## Docker Alternative

@@ -3,13 +3,16 @@ host = "127.0.0.1"
 port = 8080
 # 是否自動管理 ~/.claude/settings.json。預設 true；會設定 ANTHROPIC_BASE_URL、ENABLE_TOOL_SEARCH，
 # 並僅在 ANTHROPIC_API_KEY 不存在時注入非機密的 cc-adapter-local。
-# 以獨佔鎖、無機密備份中繼資料及原子寫入管理；正常結束時精確還原，殘留備份則在下次啟動復原。
-# 若由另一個 adapter 持有或無法安全管理，不修改設定並顯示手動 shell 指令。
+# 使用獨佔鎖與逐檔原子置換；備份不會序列化既有 ANTHROPIC_API_KEY，但會保存其他受管理鍵的舊值。
+# 正常結束時精確還原，殘留備份則在下次啟動復原。鎖競爭不修改設定；其他生命週期失敗會改用手動模式，
+# 並保留任何可復原的備份狀態。殘留備份可能已先還原原始設定，因此多檔案生命週期並非單一交易。
 # Whether to auto-manage ~/.claude/settings.json. Default true; manages ANTHROPIC_BASE_URL and
 # ENABLE_TOOL_SEARCH, and injects the non-secret cc-adapter-local ANTHROPIC_API_KEY only when absent.
-# Uses exclusive ownership, secret-free backup metadata, and atomic writes; restores exactly on
-# normal shutdown, with stale-backup recovery on the next start. If safe management is unavailable,
-# settings stay untouched and manual per-shell instructions are printed.
+# Uses exclusive ownership and per-file atomic replacement. The backup does not serialize an existing
+# ANTHROPIC_API_KEY, but preserves old values of other managed keys. Normal shutdown restores exactly;
+# the next start recovers stale backups. Lock contention leaves settings untouched. Other lifecycle
+# failures fall back to manual mode and retain any recoverable backup state; stale restoration may
+# already have completed, so the multi-file lifecycle is not transactional.
 # Set false to leave Claude settings untouched; manually set ANTHROPIC_BASE_URL,
 # ANTHROPIC_API_KEY, and ENABLE_TOOL_SEARCH in each shell that runs Claude Code.
 # manage_claude_settings = true
@@ -30,12 +33,14 @@ log_file_enabled = false
 
 # MCP 與本機 Tool Search 的執行邊界：Claude Code 管理 MCP 連線、程序、憑證、權限、工具呼叫與結果。
 # Adapter 不連線 MCP，也不需要在 ChatGPT 重複設定 connector/MCP。Claude Code 傳送含 defer_loading
-# 的完整目錄；Adapter 僅轉送非延遲工具與歷史中 tool_reference 指定的精確 schema。
+# 的完整目錄；針對 ChatGPT/Codex Responses 請求，Adapter 僅轉送非延遲工具與歷史中
+# tool_reference 指定的精確 schema。
 # MCP/local Tool Search boundary: Claude Code owns MCP connections, processes, credentials,
 # permissions, calls, and results. The adapter never connects to MCP and needs no duplicate
-# ChatGPT connector/MCP setup. It forwards only non-deferred schemas plus exact tool_reference
-# selections from the full catalog sent with defer_loading metadata. Clients without defer_loading
-# retain legacy all-tools behavior; discovery stays stateless because each request includes history.
+# ChatGPT connector/MCP setup. For ChatGPT/Codex Responses requests, it forwards only non-deferred
+# schemas plus exact tool_reference selections from the full catalog sent with defer_loading metadata.
+# Clients without defer_loading retain legacy all-tools behavior; discovery stays stateless because
+# each request includes history.
 
 # ---------------------------------------------------------------------------
 # 供應商配置 / Provider configuration
