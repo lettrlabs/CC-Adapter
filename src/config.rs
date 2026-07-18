@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "claude-adapter")]
@@ -308,32 +309,56 @@ impl Config {
     /// 載入配置：依序從配置檔、環境變數、CLI 參數合併設定
     /// Load config: merge settings from config file, environment variables, and CLI arguments
     pub fn load(args: &ServeArgs) -> Result<Self> {
-        let config_path = &args.config;
+        // 決定實際使用的配置檔路徑：
+        //   1. args.config（若存在）
+        //   2. 若 args.config 是預設相對路徑 "config.toml" 且在 cwd 找不到，
+        //      改用 ~/.config/claude-adapter/config.toml
+        // Resolve the effective config path:
+        //   1. args.config if it exists
+        //   2. if args.config is the default relative "config.toml" and is missing
+        //      in the cwd, fall back to ~/.config/claude-adapter/config.toml
+        let default_home_config = dirs::home_dir()
+            .map(|h| h.join(".config").join("claude-adapter").join("config.toml"));
+        let config_path: std::path::PathBuf = if args.config.exists() {
+            args.config.clone()
+        } else if args.config == std::path::PathBuf::from("config.toml") {
+            match &default_home_config {
+                Some(p) if p.exists() => p.clone(),
+                _ => args.config.clone(),
+            }
+        } else {
+            // 使用者明確指定了一個不存在的檔案 — 明確報錯，避免靜默使用空預設值
+            // User explicitly named a config file that doesn't exist — fail loudly
+            // rather than silently serving empty defaults.
+            anyhow::bail!(
+                "找不到指定的配置檔 / Specified config file not found: {}",
+                args.config.display()
+            );
+        };
+        let config_path = &config_path;
 
         let mut config = if config_path.exists() {
             let content = std::fs::read_to_string(config_path)
                 .with_context(|| format!("無法讀取配置檔 / Failed to read config file: {}", config_path.display()))?;
             let raw: RawConfig = toml::from_str(&content)
                 .with_context(|| format!("無法解析配置檔 / Failed to parse config file: {}", config_path.display()))?;
+            info!(path = %config_path.display(), "已載入配置檔 / Loaded config file");
             Self::resolve_raw(raw)?
         } else {
-            Config {
-                server: ServerConfig {
-                    host: "127.0.0.1".to_string(),
-                    port: 8080,
-                    log_level: "info".to_string(),
-                    log_file: None,
-                    log_file_enabled: true,
-                    claude_stream_idle_timeout_ms: default_claude_stream_idle_timeout_ms(),
-                    manage_claude_settings: default_manage_claude_settings(),
-                },
-                providers: HashMap::new(),
-                models: ModelsConfig {
-                    default_provider: "openai".to_string(),
-                    default_model: "gpt-4o".to_string(),
-                    routing: HashMap::new(),
-                },
-            }
+            // 在 cwd 和家目錄都找不到 config.toml — 明確報錯而非靜默使用無供應商的預設值
+            // No config.toml in cwd or home — fail loudly instead of silently serving
+            // provider-less defaults (which produce confusing 500 "provider not found").
+            let home_hint = default_home_config
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.config/claude-adapter/config.toml".to_string());
+            anyhow::bail!(
+                "找不到配置檔 / No config file found.\n\
+                 請在目前目錄建立 config.toml，或建立 {0}，\n\
+                 或以 --config <PATH> 指定路徑。\n\
+                 Create a config.toml in the current directory, or create {0},\n\
+                 or pass --config <PATH>.",
+                home_hint
+            );
         };
 
         // CLI 參數覆寫
