@@ -369,6 +369,7 @@ mod tests {
                 description: Some("Get weather".to_string()),
                 input_schema: json!({"type": "object", "properties": {"location": {"type": "string"}}}),
                 cache_control: None,
+                defer_loading: None,
             }]),
             tool_choice: Some(AnthropicToolChoice::Auto {
                 disable_parallel_tool_use: None,

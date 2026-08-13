@@ -1,12 +1,15 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
+use tracing::debug;
 
 use crate::types::anthropic::{
-    ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt,
-    ToolDefinition, ToolResultContent,
+    ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt, ToolDefinition,
+    ToolResultContent,
 };
 use crate::types::responses::{
-    InputContent, InputContentPart, InputItem, ReasoningConfig, ResponsesRequest,
-    ResponsesTool, TextConfig,
+    InputContent, InputContentPart, InputItem, ReasoningConfig, ResponsesRequest, ResponsesTool,
+    TextConfig,
 };
 
 /// ChatGPT Codex `codex/responses` 要求請求必須帶非空 `instructions`（對應 system）
@@ -44,7 +47,11 @@ pub fn convert_request_to_responses(
         convert_message_to_input(msg, &mut input)?;
     }
 
-    let tools = req.tools.as_ref().map(|tools| convert_tools(tools));
+    let referenced = collect_referenced_tool_names(&req.messages);
+    let tools = req
+        .tools
+        .as_ref()
+        .map(|tools| convert_tools(tools, &referenced));
 
     Ok(ResponsesRequest {
         model,
@@ -169,10 +176,7 @@ fn convert_user_blocks(blocks: &[ContentBlock], out: &mut Vec<InputItem>) -> Res
                 content_parts.push(InputContentPart::Text { text: text.clone() });
             }
             ContentBlock::Image { source } => {
-                let data_url = format!(
-                    "data:{};base64,{}",
-                    source.media_type, source.data
-                );
+                let data_url = format!("data:{};base64,{}", source.media_type, source.data);
                 content_parts.push(InputContentPart::Image {
                     image_url: data_url,
                     detail: Some("auto".to_string()),
@@ -186,7 +190,7 @@ fn convert_user_blocks(blocks: &[ContentBlock], out: &mut Vec<InputItem>) -> Res
                 let text = match content {
                     Some(ToolResultContent::Text(t)) => t.clone(),
                     Some(ToolResultContent::Blocks(inner_blocks)) => {
-                        extract_text_from_blocks(inner_blocks)
+                        extract_tool_result_text(inner_blocks)
                     }
                     None => String::new(),
                 };
@@ -223,46 +227,496 @@ fn convert_user_blocks(blocks: &[ContentBlock], out: &mut Vec<InputItem>) -> Res
 
     // 每個 tool_result → function_call_output
     for (call_id, output, _) in tool_results {
-        out.push(InputItem::FunctionCallOutput {
-            call_id,
-            output,
-        });
+        out.push(InputItem::FunctionCallOutput { call_id, output });
     }
 
     Ok(())
 }
 
-/// 從區塊中提取所有文字
-/// Extract all text from blocks
-fn extract_text_from_blocks(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
+fn extract_tool_result_text(blocks: &[ContentBlock]) -> String {
+    let mut text = String::new();
+    let mut references = Vec::new();
+    collect_tool_result_parts(blocks, &mut text, &mut references);
+    if !references.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("Loaded tools: ");
+        text.push_str(&references.join(", "));
+    }
+    text
+}
+
+fn collect_tool_result_parts(
+    blocks: &[ContentBlock],
+    text: &mut String,
+    references: &mut Vec<String>,
+) {
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text: block_text } => text.push_str(block_text),
+            ContentBlock::ToolReference { tool_name } => references.push(tool_name.clone()),
+            ContentBlock::ToolResult {
+                content: Some(ToolResultContent::Text(nested_text)),
+                ..
+            } => text.push_str(nested_text),
+            ContentBlock::ToolResult {
+                content: Some(ToolResultContent::Blocks(nested)),
+                ..
+            } => collect_tool_result_parts(nested, text, references),
+            _ => {}
+        }
+    }
+}
+
+fn collect_referenced_tool_names(messages: &[Message]) -> HashSet<String> {
+    let mut tool_search_uses = HashSet::new();
+    let mut referenced = HashSet::new();
+    for message in messages {
+        if let MessageContent::Blocks(blocks) = &message.content {
+            collect_references_from_history_blocks(
+                blocks,
+                false,
+                &mut tool_search_uses,
+                &mut referenced,
+            );
+        }
+    }
+    referenced
+}
+
+fn collect_references_from_history_blocks(
+    blocks: &[ContentBlock],
+    accept_direct_references: bool,
+    tool_search_uses: &mut HashSet<String>,
+    referenced: &mut HashSet<String>,
+) {
+    for block in blocks {
+        match block {
+            ContentBlock::ToolReference { tool_name } if accept_direct_references => {
+                referenced.insert(tool_name.clone());
+            }
+            ContentBlock::ToolUse { id, name, .. } if name == "ToolSearch" => {
+                tool_search_uses.insert(id.clone());
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content: Some(ToolResultContent::Blocks(nested)),
+                is_error,
+            } => collect_references_from_history_blocks(
+                nested,
+                is_error != &Some(true) && tool_search_uses.contains(tool_use_id),
+                tool_search_uses,
+                referenced,
+            ),
+            _ => {}
+        }
+    }
 }
 
 /// 轉換 Anthropic 工具定義為 Responses API 工具格式
 /// Convert Anthropic tool definitions to Responses API tool format
-fn convert_tools(tools: &[ToolDefinition]) -> Vec<ResponsesTool> {
-    tools
+fn convert_tools(tools: &[ToolDefinition], referenced: &HashSet<String>) -> Vec<ResponsesTool> {
+    let deferred = tools
         .iter()
-        .map(|t| ResponsesTool {
+        .filter(|tool| tool.defer_loading == Some(true))
+        .count();
+    let converted = tools
+        .iter()
+        .filter(|tool| tool.defer_loading != Some(true) || referenced.contains(&tool.name))
+        .map(|tool| ResponsesTool {
             tool_type: "function".to_string(),
-            name: t.name.clone(),
-            description: t.description.clone(),
-            parameters: Some(t.input_schema.clone()),
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: Some(tool.input_schema.clone()),
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    debug!(
+        total = tools.len(),
+        deferred,
+        referenced = referenced.len(),
+        forwarded = converted.len(),
+        "Filtered deferred tools for ChatGPT Responses request"
+    );
+
+    converted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn test_tool(name: &str, defer_loading: Option<bool>) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: Some(format!("Tool {name}")),
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading,
+        }
+    }
+
+    fn test_request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> MessagesRequest {
+        MessagesRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages,
+            system: None,
+            tools: Some(tools),
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+        }
+    }
+
+    fn discovery_history(references: &[&str]) -> Vec<Message> {
+        vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("Find a tool".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "toolu_search".to_string(),
+                    name: "ToolSearch".to_string(),
+                    input: json!({"query": "browser"}),
+                }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_search".to_string(),
+                    content: Some(ToolResultContent::Blocks(
+                        references
+                            .iter()
+                            .map(|name| ContentBlock::ToolReference {
+                                tool_name: (*name).to_string(),
+                            })
+                            .collect(),
+                    )),
+                    is_error: None,
+                }]),
+            },
+        ]
+    }
+
+    #[test]
+    fn omits_large_deferred_catalog_before_discovery() {
+        let mut tools = vec![ToolDefinition {
+            name: "ToolSearch".to_string(),
+            description: Some("Search locally available tools".to_string()),
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+        }];
+        tools.extend((0..100).map(|index| ToolDefinition {
+            name: format!("mcp__server__tool_{index}"),
+            description: Some(format!("Deferred MCP tool {index}")),
+            input_schema: json!({"type": "object", "properties": {"id": {"type": "string"}}}),
+            cache_control: None,
+            defer_loading: Some(true),
+        }));
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("Navigate to example.com".to_string()),
+            }],
+            system: None,
+            tools: Some(tools),
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+        };
+
+        let converted = convert_request_to_responses(req, "gpt-5.6-sol").unwrap();
+        let forwarded = converted.tools.unwrap();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0].name, "ToolSearch");
+    }
+
+    #[test]
+    fn loads_only_referenced_deferred_tools() {
+        let request = test_request(
+            discovery_history(&["tool_7", "tool_2"]),
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+                test_tool("tool_7", Some(true)),
+                test_tool("tool_9", Some(true)),
+            ],
+        );
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names: Vec<_> = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, vec!["ToolSearch", "tool_2", "tool_7"]);
+    }
+
+    #[test]
+    fn tool_reference_result_becomes_readable_function_output() {
+        let request = test_request(
+            discovery_history(&["tool_7", "tool_2"]),
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+                test_tool("tool_7", Some(true)),
+            ],
+        );
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let output = converted.input.iter().find_map(|item| match item {
+            InputItem::FunctionCallOutput { call_id, output } if call_id == "toolu_search" => {
+                Some(output.as_str())
+            }
+            _ => None,
+        });
+        assert_eq!(output, Some("Loaded tools: tool_7, tool_2"));
+    }
+
+    #[test]
+    fn forwards_all_tools_when_defer_loading_is_absent() {
+        let request = test_request(
+            vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("Use a legacy tool".to_string()),
+            }],
+            vec![
+                test_tool("legacy_1", None),
+                test_tool("legacy_2", None),
+                test_tool("legacy_3", None),
+            ],
+        );
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        assert_eq!(converted.tools.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn prior_history_references_remain_loaded() {
+        let mut messages = discovery_history(&["tool_2"]);
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text("I found the tool.".to_string()),
+        });
+        messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("Use it again.".to_string()),
+        });
+        let request = test_request(
+            messages,
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names: Vec<_> = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, vec!["ToolSearch", "tool_2"]);
+    }
+
+    #[test]
+    fn unknown_reference_does_not_fail_or_forward_an_unmatched_schema() {
+        let request = test_request(
+            discovery_history(&["tool_missing"]),
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_known", Some(true)),
+            ],
+        );
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names: Vec<_> = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, vec!["ToolSearch"]);
+        assert!(converted.input.iter().any(|item| matches!(
+            item,
+            InputItem::FunctionCallOutput { output, .. }
+                if output == "Loaded tools: tool_missing"
+        )));
+    }
+
+    #[test]
+    fn top_level_tool_reference_does_not_unlock_a_deferred_tool() {
+        let request = test_request(
+            vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolReference {
+                    tool_name: "tool_2".to_string(),
+                }]),
+            }],
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch"]);
+    }
+
+    #[test]
+    fn unrelated_tool_result_does_not_unlock_a_deferred_tool() {
+        let messages = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "toolu_other".to_string(),
+                    name: "LookupSomethingElse".to_string(),
+                    input: json!({}),
+                }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_other".to_string(),
+                    content: Some(ToolResultContent::Blocks(vec![
+                        ContentBlock::ToolReference {
+                            tool_name: "tool_2".to_string(),
+                        },
+                    ])),
+                    is_error: None,
+                }]),
+            },
+        ];
+        let request = test_request(
+            messages,
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch"]);
+    }
+
+    #[test]
+    fn errored_tool_search_result_does_not_unlock_a_deferred_tool() {
+        let mut messages = discovery_history(&["tool_2"]);
+        let MessageContent::Blocks(result_blocks) = &mut messages[2].content else {
+            panic!("expected tool result blocks");
+        };
+        let ContentBlock::ToolResult { is_error, .. } = &mut result_blocks[0] else {
+            panic!("expected tool result");
+        };
+        *is_error = Some(true);
+        let request = test_request(
+            messages,
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch"]);
+    }
+
+    #[test]
+    fn preserves_text_and_renders_nested_tool_references() {
+        let messages = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "toolu_search".to_string(),
+                        name: "ToolSearch".to_string(),
+                        input: json!({"query": "browser"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "nested_search".to_string(),
+                        name: "ToolSearch".to_string(),
+                        input: json!({"query": "nested browser"}),
+                    },
+                ]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_search".to_string(),
+                    content: Some(ToolResultContent::Blocks(vec![
+                        ContentBlock::Text {
+                            text: "Matches found.".to_string(),
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "nested_search".to_string(),
+                            content: Some(ToolResultContent::Blocks(vec![
+                                ContentBlock::ToolReference {
+                                    tool_name: "tool_2".to_string(),
+                                },
+                            ])),
+                            is_error: None,
+                        },
+                    ])),
+                    is_error: None,
+                }]),
+            },
+        ];
+        let request = test_request(
+            messages,
+            vec![
+                test_tool("ToolSearch", None),
+                test_tool("tool_2", Some(true)),
+            ],
+        );
+
+        let converted = convert_request_to_responses(request, "gpt-5.6-sol").unwrap();
+        let output = converted.input.iter().find_map(|item| match item {
+            InputItem::FunctionCallOutput { call_id, output } if call_id == "toolu_search" => {
+                Some(output.as_str())
+            }
+            _ => None,
+        });
+        assert_eq!(output, Some("Matches found.\nLoaded tools: tool_2"));
+        let names = converted
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ToolSearch", "tool_2"]);
+    }
 
     #[test]
     fn test_basic_text_conversion() {
@@ -377,6 +831,7 @@ mod tests {
                 description: Some("Get weather".to_string()),
                 input_schema: json!({"type": "object", "properties": {"location": {"type": "string"}}}),
                 cache_control: None,
+                defer_loading: None,
             }]),
             tool_choice: None,
             stream: None,

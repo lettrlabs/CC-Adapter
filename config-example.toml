@@ -1,10 +1,31 @@
 [server]
 host = "127.0.0.1"
 port = 8080
-# 是否自動管理 ~/.claude/settings.json（注入/還原 ANTHROPIC_BASE_URL）。預設 true。
-# 設為 false 時不修改 Claude 設定；改在 shell 中設定 ANTHROPIC_BASE_URL 以按終端選用。
-# Whether to auto-manage ~/.claude/settings.json (inject/restore ANTHROPIC_BASE_URL). Default true.
-# Set false to leave Claude settings untouched and opt in per shell via ANTHROPIC_BASE_URL.
+# 是否自動管理 ~/.claude/settings.json。預設 true；只會設定 ANTHROPIC_BASE_URL、ENABLE_TOOL_SEARCH，
+# 以及選用的 CLAUDE_STREAM_IDLE_TIMEOUT_MS。
+# 自動設定行為不擁有 ANTHROPIC_API_KEY：使用目前備份格式時，不會新增、覆寫、移除、備份或還原該 key，
+# 新備份也不含 anthropic_api_key 區段。
+# 舊版備份仍可復原：只在值仍為 cc-adapter-local 時移除舊版注入值，或還原舊備份保存的原值。
+# 使用獨佔鎖與逐檔原子置換，並保存其他受管理鍵的舊值。
+# 正常結束時精確還原，殘留備份則在下次啟動復原。鎖競爭不修改設定；其他生命週期失敗會改用手動模式，
+# 並保留任何可復原的備份狀態。殘留備份可能已先還原原始設定，因此多檔案生命週期並非單一交易。
+# Whether to auto-manage ~/.claude/settings.json. Default true; manages ANTHROPIC_BASE_URL,
+# ENABLE_TOOL_SEARCH, and the optional CLAUDE_STREAM_IDLE_TIMEOUT_MS.
+# Automatic settings behavior does not own `ANTHROPIC_API_KEY`: with the current backup shape it does not add, overwrite, remove, back up, or restore the key, and new backups do not contain an `anthropic_api_key` section.
+# Older backups remain recoverable: recovery removes a legacy injected cc-adapter-local only if it is
+# still present, or restores the prior value encoded in the legacy backup.
+# Uses exclusive ownership and per-file atomic replacement, preserving old values of managed keys.
+# Normal shutdown restores exactly;
+# the next start recovers stale backups. Lock contention leaves settings untouched. Other lifecycle
+# failures fall back to manual mode and retain any recoverable backup state; stale restoration may
+# already have completed, so the multi-file lifecycle is not transactional.
+# Set false to leave Claude settings untouched; manually set ANTHROPIC_BASE_URL and
+# ENABLE_TOOL_SEARCH=true in each shell that runs Claude Code.
+# 若 Claude Code 尚未登入，可選擇設定 ANTHROPIC_API_KEY=cc-adapter-local 作為後備。任何 API key 都會優先於
+# Claude.ai 登入，並停用 Claude.ai 託管的 connectors；本機/已設定的 MCP servers 仍可使用。
+# 已登入的 Claude Code 即使沒有 Claude model credits 也能使用：路由推論會耗用 ChatGPT/Codex quota。
+# Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.
+# Signed-in Claude Code can be out of Claude model credits because routed inference uses ChatGPT/Codex quota.
 # manage_claude_settings = true
 # 日誌等級：trace, debug, info, warn, error
 # Log level: trace, debug, info, warn, error
@@ -17,9 +38,20 @@ log_file = "adapter.log"
 # 是否啟用寫入日誌檔案（預設 true）：設為 false 時，即使有設定 log_file 也不會寫入檔案
 # Whether to enable writing logs to file (default true): when false, logs are not written to file even if log_file is set
 log_file_enabled = false
-# Claude Code 串流閒置逾時（毫秒）：寫入 ~/.claude/settings.json 的 env，停止 adapter 時與 ANTHROPIC_BASE_URL 一併還原。預設 300000（5 分鐘）。設為 0 則不注入、不備份還原此變數。
-# Claude Code stream idle timeout (ms): written to ~/.claude/settings.json env; restored on shutdown with ANTHROPIC_BASE_URL. Default 300000 (5 min). Use 0 to skip.
+# Claude Code 串流閒置逾時（毫秒）：選用的受管理 env。預設 300000（5 分鐘）；設為 0 則完全不管理此變數。
+# Claude Code stream idle timeout (ms): optional managed env. Default 300000 (5 min); use 0 to leave it completely unmanaged.
 # claude_stream_idle_timeout_ms = 300000
+
+# MCP 與本機 Tool Search 的執行邊界：Claude Code 管理 MCP 連線、程序、憑證、權限、工具呼叫與結果。
+# Adapter 不連線 MCP，也不需要在 ChatGPT 重複設定 connector/MCP。Claude Code 傳送含 defer_loading
+# 的完整目錄；針對 ChatGPT/Codex Responses 請求，Adapter 僅轉送非延遲工具與歷史中
+# tool_reference 指定的精確 schema。
+# MCP/local Tool Search boundary: Claude Code owns MCP connections, processes, credentials,
+# permissions, calls, and results. The adapter never connects to MCP and needs no duplicate
+# ChatGPT connector/MCP setup. For ChatGPT/Codex Responses requests, it forwards only non-deferred
+# schemas plus exact tool_reference selections from the full catalog sent with defer_loading metadata.
+# Clients without defer_loading retain legacy all-tools behavior; discovery stays stateless because
+# each request includes history.
 
 # ---------------------------------------------------------------------------
 # 供應商配置 / Provider configuration

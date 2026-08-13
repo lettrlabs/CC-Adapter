@@ -62,15 +62,13 @@ pub enum MessageContent {
     Blocks(Vec<ContentBlock>),
 }
 
-/// 內容區塊：依 type 欄位區分為文字、工具呼叫、工具結果、圖片、思考等類型
-/// Content block: discriminated by `type` field into text, tool_use, tool_result, image, thinking
+/// 內容區塊：依 type 欄位區分為文字、工具呼叫、工具結果、工具參考、圖片、思考等類型
+/// Content block: discriminated by `type` field into text, tool_use, tool_result, tool_reference, image, thinking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -85,10 +83,10 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    #[serde(rename = "tool_reference")]
+    ToolReference { tool_name: String },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -122,6 +120,8 @@ pub struct ToolDefinition {
     pub input_schema: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
 }
 
 /// 工具選擇策略：auto（自動）、any（必須呼叫）、tool（指定工具）、none（禁止）
@@ -213,4 +213,55 @@ pub struct ErrorDetail {
     #[serde(rename = "type")]
     pub error_type: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn deserializes_deferred_tool_and_nested_tool_reference() {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_search",
+                    "content": [{
+                        "type": "tool_reference",
+                        "tool_name": "mcp__playwright__browser_navigate"
+                    }]
+                }]
+            }],
+            "tools": [{
+                "name": "mcp__playwright__browser_navigate",
+                "description": "Navigate a browser",
+                "input_schema": {"type": "object"},
+                "defer_loading": true
+            }]
+        }))
+        .unwrap();
+
+        let tool = &request.tools.as_ref().unwrap()[0];
+        assert_eq!(tool.defer_loading, Some(true));
+
+        let MessageContent::Blocks(message_blocks) = &request.messages[0].content else {
+            panic!("expected structured message content");
+        };
+        let ContentBlock::ToolResult {
+            content: Some(ToolResultContent::Blocks(result)),
+            ..
+        } = &message_blocks[0]
+        else {
+            panic!("expected structured tool result");
+        };
+        assert!(matches!(
+            &result[0],
+            ContentBlock::ToolReference { tool_name }
+                if tool_name == "mcp__playwright__browser_navigate"
+        ));
+    }
 }

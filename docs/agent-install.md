@@ -4,6 +4,14 @@ You are installing **CC-Adapter** (Claude API Adapter) — a local proxy that tr
 
 Repository: https://github.com/Jakevin/CC-Adapter
 
+## MCP ownership and quota
+
+Claude Code remains the MCP client and orchestrator. It owns MCP connections and server processes, credentials, permissions, its local Tool Search, tool calls, and tool-result delivery. CC-Adapter never connects to or executes tools on MCP servers, and no duplicate ChatGPT connector/MCP configuration is required.
+
+Claude Code sends CC-Adapter the complete catalog with `defer_loading` metadata. For ChatGPT/Codex, the adapter forwards only non-deferred schemas plus exact schemas selected by `tool_reference` blocks in the request's conversation history. This discovery is stateless: history is included in each request, so previously referenced schemas remain loaded on subsequent turns. The filtering avoids Responses API context-window failures from eagerly forwarding a large MCP catalog. Clients without `defer_loading` keep the legacy all-tools behavior. This is Claude Code's local Tool Search, not OpenAI hosted tool search.
+
+Model requests use the selected configured provider's quota. ChatGPT/Codex routes consume the configured ChatGPT/Codex provider quota, not Claude Code model credits or Anthropic model quota; Claude Code's MCP orchestration remains local even though model inference is routed.
+
 ## Prerequisites
 
 - macOS (arm64 / amd64), Linux (arm64 / amd64), or Windows (amd64)
@@ -217,9 +225,15 @@ ADAPTER_API_KEY=sk-xxx claude-adapter serve --config ~/.config/claude-adapter/co
 
 The adapter will:
 1. Start listening on `http://127.0.0.1:8080`
-2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, and (unless `[server] claude_stream_idle_timeout_ms = 0` in config) with `CLAUDE_STREAM_IDLE_TIMEOUT_MS` for a longer stream idle timeout (default 300000 ms)
+2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH=true`, and optionally `CLAUDE_STREAM_IDLE_TIMEOUT_MS` (default 300000 ms; set `[server] claude_stream_idle_timeout_ms = 0` to leave it unmanaged)
 3. Hot-reload `config.toml` changes automatically while running
-4. Restore the previous `env` values from backup when stopped gracefully (Ctrl+C / SIGTERM / SIGHUP)
+4. Restore the exact previous presence and values of managed `env` keys on normal shutdown (Ctrl+C / SIGTERM / SIGHUP)
+
+Automatic settings behavior does not own `ANTHROPIC_API_KEY`: with the current backup shape it does not add, overwrite, remove, back up, or restore the key, and new backups do not contain an `anthropic_api_key` section. Stale backups from older releases remain compatible: recovery removes a legacy injected `cc-adapter-local` value only if it is still present, or restores the prior value encoded in the legacy backup.
+
+Prior values of managed keys are stored for restoration. Settings management uses an exclusive ownership lock and atomic replacement for each backup or settings-file write. A stale backup left by an abrupt stop or power loss is restored on the next adapter startup before fresh settings are applied.
+
+Lock contention leaves `settings.json` untouched and prints the manual per-shell configuration. A later lifecycle failure also falls back to manual mode and retains any recoverable backup state, but the lifecycle is not a transaction across both files: stale recovery may already have restored the original settings before a later backup-cleanup or fresh-application error.
 
 ## Step 4: Verify
 
@@ -238,6 +252,41 @@ claude
 
 No extra environment variables needed. The adapter auto-configured everything in Step 3.
 
+Do not add the Claude Code MCP servers to ChatGPT. Claude Code retains the MCP connections and permissions, performs local Tool Search and tool calls, and returns tool results through the adapter's normal protocol conversion.
+
+### Manual mode (`manage_claude_settings = false`)
+
+To leave `~/.claude/settings.json` untouched, add this to the config:
+
+```toml
+[server]
+manage_claude_settings = false
+```
+
+Start the adapter, then set the two required values in the shell that will run Claude Code. `CLAUDE_STREAM_IDLE_TIMEOUT_MS` is optional.
+
+PowerShell:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
+$env:ENABLE_TOOL_SEARCH = "true"
+claude
+```
+
+POSIX shell:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ENABLE_TOOL_SEARCH=true
+claude
+```
+
+Use the adapter's actual host and port if they differ from `127.0.0.1:8080`.
+
+Optional fallback for a Claude Code client that is not signed in: `ANTHROPIC_API_KEY=cc-adapter-local`. Setting any API key takes precedence over your Claude.ai login and disables Claude.ai-hosted connectors; local/configured MCP servers still work.
+
+Signed-in Claude Code can be out of Claude model credits because routed inference uses ChatGPT/Codex quota.
+
 ## Troubleshooting
 
 - **"connection refused"**: Adapter is not running. Start it first (Step 3).
@@ -245,6 +294,8 @@ No extra environment variables needed. The adapter auto-configured everything in
 - **API key errors**: Check that `api_key` in config.toml is correct, or set `ADAPTER_API_KEY` env var.
 - **ChatGPT token expired**: Run `claude-adapter login` again.
 - **Port conflict**: Change `port` in config.toml or use `--port <PORT>` flag.
+- **Settings were not auto-configured**: If another adapter owns the exclusive lock, this process leaves settings unchanged. For other lifecycle errors, use the manual per-shell values printed at startup and leave any backup file in place for recovery; stale recovery may already have restored the original settings before the error. Check the warning log for the exact failure.
+- **Adapter stopped abruptly**: Restart it once to run stale-backup recovery. Recovery occurs on the next startup; it is not guaranteed at the moment of power loss.
 
 ## Docker Alternative
 
